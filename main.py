@@ -19,7 +19,13 @@ from src.config import DOCS_PASS, DOCS_URL, PORT, TELEGRAM_BOT_TOKEN
 from src.database import init_db
 
 docs_path = f"/{DOCS_URL}" if DOCS_URL else "/docs"
-app = FastAPI(title="Celerity Wrapper", docs_url=docs_path, redoc_url=None)
+app = FastAPI(
+    title="tgVPNapi",
+    description="API для управления VPN-подписками. Авторизация через Bearer-токен.",
+    version="1.0.0",
+    docs_url=docs_path,
+    redoc_url=None,
+)
 app.include_router(router)
 
 
@@ -91,7 +97,7 @@ def main():
     else:
         print("TELEGRAM_BOT_TOKEN not set, bot disabled")
 
-    print(f"Celerity Wrapper API listening on port {PORT}")
+    print(f"tgVPNapi listening on port {PORT}")
     uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="info")
 
 
