@@ -25,8 +25,8 @@ from src.models.package import (
     list_packages,
     update_package,
 )
-from src.models.subscription import count_subscriptions
-from src.models.transaction import create_transaction, get_stats
+from src.models.subscription import count_expired, count_new_subscriptions_today, count_subscriptions
+from src.models.transaction import create_transaction, get_detailed_stats
 from src.services.panel_api import list_groups as fetch_groups
 
 log = logging.getLogger(__name__)
@@ -322,20 +322,56 @@ async def _show_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def _show_stats(update: Update) -> None:
     total_subs = count_subscriptions()
     active_subs = count_subscriptions(status="active")
-    total_tokens = len(list_client_tokens())
-    tx = get_stats()
-    topups = tx.get("topup", 0) or 0
-    charges = abs(tx.get("charge", 0) or 0)
+    deleted_subs = count_subscriptions(status="deleted")
+    expired_subs = count_expired()
+    new_today = count_new_subscriptions_today()
+    tokens = list_client_tokens()
+    total_tokens = len(tokens)
+    active_tokens = sum(1 for t in tokens if t["active"])
+    total_balance = sum(t["balance"] for t in tokens)
+
+    tx = get_detailed_stats()
+    by_type = tx.get("by_type", {})
+    topups_all = by_type.get("topup", {}).get("total", 0)
+    charges_all = abs(by_type.get("charge", {}).get("total", 0))
+    refunds_all = by_type.get("refund", {}).get("total", 0) or 0
+
+    today = tx.get("today", {})
+    week = tx.get("week", {})
+    month = tx.get("month", {})
+
+    top_pkgs = tx.get("top_packages", [])
+    top_lines = "\n".join(
+        f"  `{i+1}.` {_esc(p['name'])} — {p['count']} шт, `{p['revenue']} ₽`"
+        for i, p in enumerate(top_pkgs)
+    ) if top_pkgs else "  _нет данных_"
+
     text = (
         "📊 *Статистика*\n\n"
-        f"Подписок всего: `{total_subs}`\n"
-        f"Активных: `{active_subs}`\n"
-        f"Токенов: `{total_tokens}`\n"
-        f"Пополнения: `{topups} ₽`\n"
-        f"Списания: `{charges} ₽`"
+        "*Подписки*\n"
+        f"  Всего: `{total_subs}` | Активных: `{active_subs}`\n"
+        f"  Просрочено: `{expired_subs}` | Удалено: `{deleted_subs}`\n"
+        f"  Новых сегодня: `{new_today}`\n\n"
+        "*Клиенты*\n"
+        f"  Токенов: `{total_tokens}` (активных: `{active_tokens}`)\n"
+        f"  Общий баланс: `{total_balance} ₽`\n\n"
+        "*Финансы — сегодня*\n"
+        f"  Пополнения: `{today['topups']} ₽` | Продажи: `{today['charges']} ₽` ({today['sales']} шт)\n\n"
+        "*Финансы — 7 дней*\n"
+        f"  Пополнения: `{week['topups']} ₽` | Продажи: `{week['charges']} ₽` ({week['sales']} шт)\n\n"
+        "*Финансы — 30 дней*\n"
+        f"  Пополнения: `{month['topups']} ₽` | Продажи: `{month['charges']} ₽` ({month['sales']} шт)\n\n"
+        "*Финансы — всё время*\n"
+        f"  Пополнения: `{topups_all} ₽`\n"
+        f"  Списания: `{charges_all} ₽`\n"
+        f"  Возвраты: `{refunds_all} ₽`\n\n"
+        f"*Топ пакетов по продажам*\n{top_lines}"
     )
     markup = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("🔙 Главное меню", callback_data="back_main")]]
+        [
+            [InlineKeyboardButton("🔄 Обновить", callback_data="stats_refresh")],
+            [InlineKeyboardButton("🔙 Главное меню", callback_data="back_main")],
+        ]
     )
     await _edit_or_reply(update, text, markup)
 
@@ -1041,9 +1077,13 @@ async def on_stats(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if q is None:
         return STATS
     await q.answer()
-    if (q.data or "") == "back_main":
+    data = q.data or ""
+    if data == "back_main":
         await _show_main(update)
         return MAIN
+    if data == "stats_refresh":
+        await _show_stats(update)
+        return STATS
     return STATS
 
 
@@ -1134,7 +1174,7 @@ def register(app) -> None:
                 MessageHandler(_txt, on_token_topup_amount),
             ],
             STATS: [
-                CallbackQueryHandler(on_stats, pattern="^back_main$"),
+                CallbackQueryHandler(on_stats, pattern="^(back_main|stats_refresh)$"),
             ],
         },
         fallbacks=[CommandHandler("cancel", cmd_cancel)],

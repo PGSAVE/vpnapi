@@ -29,6 +29,12 @@ def create_user(
     return r.json()
 
 
+def update_user(user_id: str, **fields) -> dict:
+    r = _client.put(f"/api/users/{user_id}", json=fields)
+    r.raise_for_status()
+    return r.json()
+
+
 def get_user(user_id: str) -> dict:
     r = _client.get(f"/api/users/{user_id}")
     r.raise_for_status()

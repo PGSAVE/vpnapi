@@ -6,7 +6,7 @@ from src.api.middleware import auth_dependency
 from src.config import PANEL_SUB_URL
 from src.models.package import list_packages
 from src.models.subscription import list_subscriptions, get_subscription_for_client
-from src.services.subscription_service import create_sub, delete_sub, APIError
+from src.services.subscription_service import create_sub, delete_sub, renew_sub, APIError
 
 router = APIRouter(prefix="/api/v1", dependencies=[Depends(auth_dependency)])
 
@@ -49,6 +49,15 @@ def get_subscription(sub_id: int, ct=Depends(auth_dependency)):
         raise HTTPException(404, "Not found")
     sub["sub_link"] = f"{PANEL_SUB_URL}/api/files/{sub['panel_subscription_token']}" if sub.get("panel_subscription_token") else None
     return sub
+
+
+@router.post("/subscriptions/{sub_id}/renew")
+def renew_subscription(sub_id: int, ct=Depends(auth_dependency)):
+    try:
+        sub = renew_sub(ct, sub_id)
+        return {"success": True, "subscription": sub}
+    except APIError as e:
+        raise HTTPException(e.status_code, str(e))
 
 
 @router.delete("/subscriptions/{sub_id}")
