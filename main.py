@@ -30,7 +30,15 @@ def run_bot():
     client_handlers.register(application)
 
     print("Telegram bot started")
-    application.run_polling(drop_pending_updates=True)
+
+    async def _run():
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True)
+        # Keep alive until the daemon thread is torn down on process exit
+        await asyncio.Event().wait()
+
+    loop.run_until_complete(_run())
 
 
 def main():
