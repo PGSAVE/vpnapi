@@ -278,22 +278,36 @@ async def on_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     if data == "cl_tariffs":
         pkgs = list_packages(active_only=True)
-        if not pkgs:
-            text = "🏷 *Тарифы*\n\n_Нет доступных тарифов_"
-        else:
-            lines = ["🏷 *Тарифы*\n"]
-            for p in pkgs:
-                traffic = "Безлимит" if not p["traffic_limit_gb"] else f"{p['traffic_limit_gb']} GB"
-                lines.append(
-                    f"▫️ *{_esc(p['name'])}*\n"
-                    f"   Цена: `{p['price']:.0f} ₽`\n"
-                    f"   Срок: `{p['duration_days']} дн.`\n"
-                    f"   Трафик: `{traffic}`\n"
-                    f"   Устройств: `{p['max_devices']}`"
-                )
-            text = "\n".join(lines)
+        rows = []
+        for p in pkgs:
+            rows.append([InlineKeyboardButton(
+                f"🏷 {p['name']} — {p['price']:.0f} ₽",
+                callback_data=f"cl_pkg:{p['id']}",
+            )])
+        rows.append([InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")])
+        text = "🏷 *Тарифы*\n\nВыберите тариф для подробной информации:" if pkgs else "🏷 *Тарифы*\n\n_Нет доступных тарифов_"
+        await _safe_edit(q, text, InlineKeyboardMarkup(rows))
+        return CLIENT_MAIN
+
+    if data.startswith("cl_pkg:"):
+        pkg_id = int(data.split(":")[1])
+        p = get_package(pkg_id)
+        if not p:
+            await q.answer("Тариф не найден", show_alert=True)
+            return CLIENT_MAIN
+        traffic = "Безлимит" if not p["traffic_limit_gb"] else f"{p['traffic_limit_gb']} GB"
+        desc = _esc(p["description"]) if p.get("description") else "—"
+        text = (
+            f"🏷 *{_esc(p['name'])}*\n\n"
+            f"ID: `{p['id']}`\n"
+            f"Описание: {desc}\n"
+            f"Цена: `{p['price']:.0f} ₽`\n"
+            f"Срок: `{p['duration_days']} дн.`\n"
+            f"Трафик: `{traffic}`\n"
+            f"Устройств: `{p['max_devices']}`"
+        )
         markup = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
+            [[InlineKeyboardButton("🔙 К тарифам", callback_data="cl_tariffs")]]
         )
         await _safe_edit(q, text, markup)
         return CLIENT_MAIN
@@ -616,7 +630,7 @@ def register(app) -> None:
             CLIENT_MAIN: [
                 CallbackQueryHandler(
                     on_main,
-                    pattern="^(cl_subs|cl_stats|cl_search|cl_tariffs|cl_docs|cl_back_main|cl_back_subs_from_confirm)$",
+                    pattern="^(cl_subs|cl_stats|cl_search|cl_tariffs|cl_pkg:\\d+|cl_docs|cl_back_main|cl_back_subs_from_confirm)$",
                 ),
             ],
             CLIENT_SUBS: [
