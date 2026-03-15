@@ -1,11 +1,12 @@
 import asyncio
 import threading
+
 import uvicorn
 from fastapi import FastAPI
 
+from src.api.routes import router
 from src.config import PORT, TELEGRAM_BOT_TOKEN
 from src.database import init_db
-from src.api.routes import router
 
 app = FastAPI(title="Celerity Wrapper")
 app.include_router(router)
@@ -18,7 +19,11 @@ def health():
 
 def run_bot():
     from telegram.ext import ApplicationBuilder
+
     from src.bot import admin_handlers, client_handlers
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
 
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     admin_handlers.register(application)
