@@ -1,3 +1,4 @@
+import atexit
 import json
 import logging
 import sqlite3
@@ -7,6 +8,8 @@ from src.config import DATABASE_PATH
 log = logging.getLogger(__name__)
 
 _local = threading.local()
+_all_connections: list[sqlite3.Connection] = []
+_lock = threading.Lock()
 
 
 def get_db() -> sqlite3.Connection:
@@ -17,7 +20,31 @@ def get_db() -> sqlite3.Connection:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
         _local.conn = conn
+        with _lock:
+            _all_connections.append(conn)
     return conn
+
+
+def close_all():
+    """Close all connections and checkpoint WAL into the main database file."""
+    with _lock:
+        for conn in _all_connections:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        _all_connections.clear()
+    # Final checkpoint with a fresh connection
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+        log.info("WAL checkpoint completed")
+    except Exception:
+        log.warning("WAL checkpoint failed", exc_info=True)
+
+
+atexit.register(close_all)
 
 
 def init_db():

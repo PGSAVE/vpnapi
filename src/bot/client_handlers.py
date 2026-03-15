@@ -261,7 +261,12 @@ async def on_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
 
     if data == "cl_docs":
         docs_link = f"{API_BASE_URL}/{DOCS_URL}"
-        text = f"📄 *Документация API*\n\nСсылка: {docs_link}\nПароль: `{DOCS_PASS}`"
+        text = (
+            f"📄 *Документация API*\n\n"
+            f"Ссылка: {docs_link}\n"
+            f"Пароль: `{DOCS_PASS}`\n\n"
+            f"Ваш токен: `{ct['token']}`"
+        )
         markup = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
         )
