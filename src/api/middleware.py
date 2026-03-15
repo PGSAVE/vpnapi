@@ -1,13 +1,15 @@
-from fastapi import Request, HTTPException
+from fastapi import Depends, Request, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from src.models.client_token import get_client_token
 
+_bearer = HTTPBearer()
 
-async def auth_dependency(request: Request):
-    auth = request.headers.get("authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid Authorization header")
-    token = auth[7:]
-    ct = get_client_token(token)
+
+async def auth_dependency(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Security(_bearer),
+):
+    ct = get_client_token(credentials.credentials)
     if not ct:
         raise HTTPException(401, "Invalid or inactive token")
     request.state.client_token = ct

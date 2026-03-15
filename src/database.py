@@ -1,6 +1,10 @@
+import json
+import logging
 import sqlite3
 import threading
 from src.config import DATABASE_PATH
+
+log = logging.getLogger(__name__)
 
 _local = threading.local()
 
@@ -64,3 +68,41 @@ def init_db():
         );
     """)
     db.commit()
+    _migrate_group_names_to_ids(db)
+
+
+def _migrate_group_names_to_ids(db: sqlite3.Connection):
+    """One-time migration: convert group name strings to {_id, name} dicts."""
+    from src.services.panel_api import list_groups
+
+    rows = db.execute("SELECT id, groups FROM packages").fetchall()
+    needs_migration = False
+    for row in rows:
+        groups = json.loads(row["groups"] or "[]")
+        if groups and isinstance(groups[0], str):
+            needs_migration = True
+            break
+
+    if not needs_migration:
+        return
+
+    panel_groups = list_groups()
+    name_to_group = {g["name"]: g for g in panel_groups}
+
+    updated = 0
+    for row in rows:
+        groups = json.loads(row["groups"] or "[]")
+        if not groups or not isinstance(groups[0], str):
+            continue
+        new_groups = []
+        for name in groups:
+            if name in name_to_group:
+                new_groups.append(name_to_group[name])
+            else:
+                log.warning("Group '%s' not found in panel, skipping (pkg %s)", name, row["id"])
+        db.execute("UPDATE packages SET groups=? WHERE id=?", (json.dumps(new_groups), row["id"]))
+        updated += 1
+
+    if updated:
+        db.commit()
+        log.info("Migrated groups for %d packages (name -> ObjectId)", updated)

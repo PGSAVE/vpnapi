@@ -16,7 +16,7 @@ class APIError(Exception):
         self.status_code = status_code
 
 
-def create_sub(client_token, package_id, username=None):
+def create_sub(client_token, package_id, user_id=None):
     pkg = get_package(package_id)
     if not pkg or not pkg["active"]:
         raise APIError("Package not found", 404)
@@ -24,16 +24,24 @@ def create_sub(client_token, package_id, username=None):
     if client_token["balance"] < pkg["price"]:
         raise APIError("Insufficient balance", 402)
 
-    user_id = username or f"w_{secrets.token_hex(4)}"
+    panel_user_id = f"api_{user_id}_{secrets.token_hex(4)}" if user_id else f"api_{secrets.token_hex(4)}_{secrets.token_hex(4)}"
     expires_at = (datetime.now(timezone.utc) + timedelta(days=pkg["duration_days"])).isoformat()
 
-    panel_user = create_user(
-        user_id=user_id,
-        username=user_id,
-        groups=pkg["groups"],
-        traffic_limit_gb=pkg["traffic_limit_gb"],
-        expire_at=expires_at,
-    )
+    try:
+        panel_user = create_user(
+            user_id=panel_user_id,
+            username=panel_user_id,
+            groups=pkg["groups"],
+            traffic_limit_gb=pkg["traffic_limit_gb"],
+            expire_at=expires_at,
+        )
+    except httpx.HTTPStatusError as e:
+        detail = ""
+        try:
+            detail = e.response.json().get("message", e.response.text)
+        except Exception:
+            detail = e.response.text
+        raise APIError(f"Panel error: {detail}", 502)
 
     update_balance(client_token["id"], -pkg["price"])
 

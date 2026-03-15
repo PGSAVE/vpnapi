@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1", dependencies=[Depends(auth_dependency)])
 
 class CreateSubscriptionBody(BaseModel):
     packageId: int
-    username: Optional[str] = None
+    userId: Optional[str] = None
 
 
 @router.get("/packages")
@@ -32,7 +32,7 @@ def get_balance(ct=Depends(auth_dependency)):
 @router.post("/subscriptions", status_code=201)
 def post_subscription(body: CreateSubscriptionBody, ct=Depends(auth_dependency)):
     try:
-        return create_sub(ct, body.packageId, body.username)
+        return create_sub(ct, body.packageId, body.userId)
     except APIError as e:
         raise HTTPException(e.status_code, str(e))
 

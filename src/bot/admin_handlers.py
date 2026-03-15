@@ -155,12 +155,16 @@ def kb_pkg_edit_menu(pkg_id: int) -> InlineKeyboardMarkup:
     )
 
 
-def kb_groups(all_groups: list, selected: set) -> InlineKeyboardMarkup:
-    """Groups referenced by index so callback_data stays within 64 bytes."""
+def kb_groups(all_groups: list[dict], selected: set) -> InlineKeyboardMarkup:
+    """Groups referenced by index so callback_data stays within 64 bytes.
+
+    ``all_groups`` is a list of ``{"_id": ..., "name": ...}`` dicts.
+    ``selected`` is a set of ``_id`` strings.
+    """
     rows = []
     for i, g in enumerate(all_groups):
-        mark = "✅" if g in selected else "⬜️"
-        rows.append([InlineKeyboardButton(f"{mark} {g}", callback_data=f"grp:{i}")])
+        mark = "✅" if g["_id"] in selected else "⬜️"
+        rows.append([InlineKeyboardButton(f"{mark} {g['name']}", callback_data=f"grp:{i}")])
     rows.append([InlineKeyboardButton("✓ Готово", callback_data="grp_done")])
     return InlineKeyboardMarkup(rows)
 
@@ -218,7 +222,10 @@ def _esc(text: str) -> str:
 
 def fmt_pkg(p: dict) -> str:
     status = "✅ Активен" if p["active"] else "❌ Отключён"
-    groups = ", ".join(p.get("groups") or []) or "—"
+    raw_groups = p.get("groups") or []
+    groups = ", ".join(
+        g["name"] if isinstance(g, dict) else str(g) for g in raw_groups
+    ) or "—"
     desc = _esc(p["description"]) if p.get("description") else "—"
     return (
         f"📦 *{_esc(p['name'])}*\n"
@@ -340,12 +347,12 @@ def _toggle_group(cb_data: str, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     all_groups = ud.get("all_groups", [])
     if idx >= len(all_groups):
         return
-    name: str = all_groups[idx]
+    gid: str = all_groups[idx]["_id"]
     selected: set = ud.setdefault("selected_groups", set())
-    if name in selected:
-        selected.discard(name)
+    if gid in selected:
+        selected.discard(gid)
     else:
-        selected.add(name)
+        selected.add(gid)
 
 
 # ---------------------------------------------------------------------------
@@ -570,6 +577,8 @@ async def on_pkg_create_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
 
     if data == "grp_done":
         selected = ud.get("selected_groups", set())
+        all_groups = ud.get("all_groups", [])
+        groups_to_save = [g for g in all_groups if g["_id"] in selected]
         d = ud.get("pkg_new", {})
         pkg = create_package(
             d.get("name", ""),
@@ -578,7 +587,7 @@ async def on_pkg_create_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
             d.get("duration_days", 30),
             d.get("price", 0),
             d.get("description", ""),
-            list(selected),
+            groups_to_save,
         )
         ud.pop("pkg_new", None)
         ud["pkg_id"] = pkg["id"]
@@ -685,7 +694,7 @@ async def on_pkg_edit_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         pkg = get_package(pkg_id)
         ud["pkg_id"] = pkg_id
         ud["all_groups"] = fetch_groups()
-        ud["selected_groups"] = set(pkg.get("groups") or []) if pkg else set()
+        ud["selected_groups"] = {g["_id"] for g in (pkg.get("groups") or []) if isinstance(g, dict)} if pkg else set()
         await _show_groups(update, ctx)
         return PKG_EDIT_GROUPS
 
@@ -800,8 +809,10 @@ async def on_pkg_edit_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
     if data == "grp_done":
         pkg_id = ud.get("pkg_id")
         selected = ud.get("selected_groups", set())
+        all_groups = ud.get("all_groups", [])
         if pkg_id is not None:
-            update_package(pkg_id, groups=list(selected))
+            groups_to_save = [g for g in all_groups if g["_id"] in selected]
+            update_package(pkg_id, groups=groups_to_save)
             pkg = get_package(pkg_id)
             if pkg:
                 await q.edit_message_text(
