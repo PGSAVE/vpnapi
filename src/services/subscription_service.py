@@ -63,17 +63,27 @@ def _parse_panel_error(e: httpx.HTTPStatusError) -> str:
         return e.response.text
 
 
-def create_sub(client_token, package_id, user_id=None):
+def create_sub(client_token, package_id, user_id=None, days=None):
     pkg = get_package(package_id)
     if not pkg or not pkg["active"]:
         raise APIError("Package not found", 404)
 
-    if client_token["balance"] < pkg["price"]:
-        _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], pkg["price"])
+    is_flex = not pkg["duration_days"]
+    if is_flex:
+        if not days or days <= 0:
+            raise APIError("Parameter 'days' is required for flexible packages", 400)
+        duration = days
+        price = pkg["price"] * days
+    else:
+        duration = pkg["duration_days"]
+        price = pkg["price"]
+
+    if client_token["balance"] < price:
+        _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], price)
         raise APIError("Insufficient balance", 402)
 
     panel_user_id = f"api_{user_id}_{secrets.token_hex(4)}" if user_id else f"api_{secrets.token_hex(4)}_{secrets.token_hex(4)}"
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=pkg["duration_days"])).isoformat()
+    expires_at = (datetime.now(timezone.utc) + timedelta(days=duration)).isoformat()
 
     try:
         panel_user = create_user(
@@ -91,7 +101,7 @@ def create_sub(client_token, package_id, user_id=None):
         logger.error("Panel unreachable on create_user")
         raise APIError("Panel unreachable", 502)
 
-    new_balance = update_balance(client_token["id"], -pkg["price"])
+    new_balance = update_balance(client_token["id"], -price)
     if new_balance < LOW_BALANCE_THRESHOLD:
         _notify_low_balance(client_token.get("telegram_user_id"), new_balance)
 
@@ -103,21 +113,22 @@ def create_sub(client_token, package_id, user_id=None):
         expires_at=expires_at,
     )
 
+    desc = f"Subscription: {pkg['name']}" + (f" ({duration}д)" if is_flex else "")
     create_transaction(
         client_token_id=client_token["id"],
-        amount=-pkg["price"],
+        amount=-price,
         tx_type="charge",
-        description=f"Subscription: {pkg['name']}",
+        description=desc,
         subscription_id=sub["id"],
     )
 
-    logger.info("Subscription created: id=%s client=%s pkg=%s balance=%.0f", sub["id"], client_token["id"], pkg["name"], new_balance)
+    logger.info("Subscription created: id=%s client=%s pkg=%s days=%s price=%.0f balance=%.0f", sub["id"], client_token["id"], pkg["name"], duration, price, new_balance)
 
     sub_link = f"{PANEL_SUB_URL}/api/files/{panel_user.get('subscriptionToken')}" if panel_user.get("subscriptionToken") else None
     return {**sub, "sub_link": sub_link}
 
 
-def renew_sub(client_token, sub_id):
+def renew_sub(client_token, sub_id, days=None):
     sub = get_subscription_for_client(sub_id, client_token["id"])
     if not sub:
         raise APIError("Subscription not found", 404)
@@ -128,16 +139,25 @@ def renew_sub(client_token, sub_id):
     if not pkg:
         raise APIError("Package not found", 404)
 
-    if client_token["balance"] < pkg["price"]:
-        _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], pkg["price"])
+    is_flex = not pkg["duration_days"]
+    if is_flex:
+        if not days or days <= 0:
+            raise APIError("Parameter 'days' is required for flexible packages", 400)
+        duration = days
+        price = pkg["price"] * days
+    else:
+        duration = pkg["duration_days"]
+        price = pkg["price"]
+
+    if client_token["balance"] < price:
+        _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], price)
         raise APIError("Insufficient balance", 402)
 
-    # Extend from current expiry or from now if already expired
     current_exp = datetime.fromisoformat(sub["expires_at"].replace("Z", "+00:00"))
     if current_exp.tzinfo is None:
         current_exp = current_exp.replace(tzinfo=timezone.utc)
     base = max(current_exp, datetime.now(timezone.utc))
-    new_expires = (base + timedelta(days=pkg["duration_days"])).isoformat()
+    new_expires = (base + timedelta(days=duration)).isoformat()
 
     try:
         update_user(sub["panel_user_id"], expireAt=new_expires)
@@ -150,19 +170,20 @@ def renew_sub(client_token, sub_id):
         raise APIError("Panel unreachable", 502)
 
     update_expires_at(sub_id, new_expires)
-    new_balance = update_balance(client_token["id"], -pkg["price"])
+    new_balance = update_balance(client_token["id"], -price)
     if new_balance < LOW_BALANCE_THRESHOLD:
         _notify_low_balance(client_token.get("telegram_user_id"), new_balance)
 
+    desc = f"Renew: {pkg['name']}" + (f" ({duration}д)" if is_flex else "")
     create_transaction(
         client_token_id=client_token["id"],
-        amount=-pkg["price"],
+        amount=-price,
         tx_type="charge",
-        description=f"Renew: {pkg['name']}",
+        description=desc,
         subscription_id=sub_id,
     )
 
-    logger.info("Subscription renewed: id=%s client=%s pkg=%s balance=%.0f", sub_id, client_token["id"], pkg["name"], new_balance)
+    logger.info("Subscription renewed: id=%s client=%s pkg=%s days=%s price=%.0f balance=%.0f", sub_id, client_token["id"], pkg["name"], duration, price, new_balance)
 
     sub["expires_at"] = new_expires
     sub["status"] = "active"

@@ -281,7 +281,7 @@ async def on_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         rows = []
         for p in pkgs:
             rows.append([InlineKeyboardButton(
-                f"🏷 {p['name']} — {p['price']:.0f} ₽",
+                f"🏷 {p['name']} — {p['price']:.0f} {'₽/день' if not p['duration_days'] else '₽'}",
                 callback_data=f"cl_pkg:{p['id']}",
             )])
         rows.append([InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")])
@@ -301,8 +301,8 @@ async def on_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"🏷 *{_esc(p['name'])}*\n\n"
             f"ID: `{p['id']}`\n"
             f"Описание: {desc}\n"
-            f"Цена: `{p['price']:.0f} ₽`\n"
-            f"Срок: `{p['duration_days']} дн.`\n"
+            f"Цена: `{p['price']:.0f} {'₽/день' if not p['duration_days'] else '₽'}`\n"
+            f"Срок: `{'Гибкий (указывается при создании)' if not p['duration_days'] else str(p['duration_days']) + ' дн.'}`\n"
             f"Трафик: `{traffic}`\n"
             f"Устройств: `{p['max_devices']}`"
         )

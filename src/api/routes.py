@@ -14,6 +14,7 @@ router = APIRouter(prefix="/vpnapi", dependencies=[Depends(auth_dependency)])
 class CreateSubscriptionBody(BaseModel):
     packageId: int = Field(..., description="ID тарифного пакета")
     userId: Optional[str] = Field(None, description="Идентификатор пользователя (опционально). Если не указан, генерируется автоматически")
+    days: Optional[int] = Field(None, description="Количество дней (обязательно для гибких тарифов, где срок не фиксирован)")
 
 
 @router.get(
@@ -45,6 +46,7 @@ def get_balance(ct=Depends(auth_dependency)):
     summary="Создать подписку",
     description="Создаёт новую VPN-подписку по указанному пакету. "
     "Стоимость списывается с баланса клиента. "
+    "Для гибких тарифов обязательно указать параметр `days`. "
     "Возвращает данные подписки и ссылку на конфигурацию.",
     responses={
         201: {"description": "Подписка успешно создана"},
@@ -55,7 +57,7 @@ def get_balance(ct=Depends(auth_dependency)):
 )
 def post_subscription(body: CreateSubscriptionBody, ct=Depends(auth_dependency)):
     try:
-        return create_sub(ct, body.packageId, body.userId)
+        return create_sub(ct, body.packageId, body.userId, body.days)
     except APIError as e:
         raise HTTPException(e.status_code, str(e))
 
@@ -91,6 +93,7 @@ def get_subscription(sub_id: int, ct=Depends(auth_dependency)):
     summary="Продлить подписку",
     description="Продлевает существующую подписку на срок пакета. "
     "Стоимость списывается с баланса. "
+    "Для гибких тарифов обязательно указать параметр `days`. "
     "Срок добавляется к текущей дате истечения (или от текущего момента, если подписка просрочена).",
     responses={
         200: {"description": "Подписка успешно продлена"},
@@ -100,9 +103,9 @@ def get_subscription(sub_id: int, ct=Depends(auth_dependency)):
         502: {"description": "Ошибка панели управления"},
     },
 )
-def renew_subscription(sub_id: int, ct=Depends(auth_dependency)):
+def renew_subscription(sub_id: int, days: Optional[int] = None, ct=Depends(auth_dependency)):
     try:
-        sub = renew_sub(ct, sub_id)
+        sub = renew_sub(ct, sub_id, days=days)
         return {"success": True, "subscription": sub}
     except APIError as e:
         raise HTTPException(e.status_code, str(e))

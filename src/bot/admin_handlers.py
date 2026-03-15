@@ -96,7 +96,7 @@ def kb_packages(pkgs: list) -> InlineKeyboardMarkup:
         rows.append(
             [
                 InlineKeyboardButton(
-                    f"{mark} {p['name']}  {p['price']}₽ / {p['duration_days']}д",
+                    f"{mark} {p['name']}  {p['price']}{'₽/день' if not p['duration_days'] else '₽ / ' + str(p['duration_days']) + 'д'}",
                     callback_data=f"pkg_detail:{p['id']}",
                 )
             ]
@@ -230,8 +230,8 @@ def fmt_pkg(p: dict) -> str:
         f"Статус: {status}\n"
         f"Трафик: `{'Безлимит' if not p['traffic_limit_gb'] else str(p['traffic_limit_gb']) + ' GB'}`\n"
         f"Устройств: `{p['max_devices']}`\n"
-        f"Длительность: `{p['duration_days']} дней`\n"
-        f"Цена: `{p['price']} ₽`\n"
+        f"Длительность: `{'Гибкий' if not p['duration_days'] else str(p['duration_days']) + ' дней'}`\n"
+        f"Цена: `{p['price']} {'₽/день' if not p['duration_days'] else '₽'}`\n"
         f"Группы: {_esc(groups)}\n"
         f"Описание: {desc}\n"
         f"ID: `{p['id']}`"
@@ -534,19 +534,25 @@ async def on_pkg_create_devices(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
 async def on_pkg_create_days(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     if not update.message:
         return PKG_CREATE_DAYS
-    try:
-        val = int((update.message.text or "").strip())
-        if val <= 0:
-            raise ValueError
-    except ValueError:
-        await update.message.reply_text(
-            "❌ Введите целое положительное число, например: `30`",
-            parse_mode="Markdown",
-        )
-        return PKG_CREATE_DAYS
+    raw = (update.message.text or "").strip()
+    if raw == "0" or raw.lower() in ("гибкий", "flex"):
+        val = 0
+    else:
+        try:
+            val = int(raw)
+            if val <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Введите целое положительное число, например: `30`\n"
+                "Или `0` / `гибкий` для гибкого тарифа (дни указываются при создании подписки).",
+                parse_mode="Markdown",
+            )
+            return PKG_CREATE_DAYS
     _ud(ctx).setdefault("pkg_new", {})["duration_days"] = val
+    price_hint = "цену за день" if val == 0 else "цену"
     await update.message.reply_text(
-        "📦 *Шаг 5 из 7*\n\nВведите *цену* в рублях (например: `299`):",
+        f"📦 *Шаг 5 из 7*\n\nВведите *{price_hint}* в рублях (например: `299`):",
         parse_mode="Markdown",
     )
     return PKG_CREATE_PRICE
@@ -743,7 +749,9 @@ async def on_pkg_edit_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         ud["edit_field"] = field
         label = _FIELD_LABELS.get(field, field)
         current_val = pkg.get(field, "")
-        if field in ("max_devices", "duration_days"):
+        if field == "duration_days":
+            hint = " (целое число или `0`/`гибкий`)"
+        elif field == "max_devices":
             hint = " (целое число)"
         elif field == "traffic_limit_gb":
             hint = " (или `0` / `безлимит`)"
@@ -777,9 +785,22 @@ async def on_pkg_edit_value(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> i
         await update.message.reply_text("⚠️ Ошибка состояния. Используйте /admin")
         return ConversationHandler.END
 
-    if field in ("max_devices", "duration_days"):
+    if field == "duration_days":
+        if raw == "0" or raw.lower() in ("гибкий", "flex"):
+            value: int | float | str = 0
+        else:
+            try:
+                value = int(raw)
+                if value <= 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text(
+                    "❌ Введите целое положительное число или `0` / `гибкий`.", parse_mode="Markdown"
+                )
+                return PKG_EDIT_VALUE
+    elif field == "max_devices":
         try:
-            value: int | float | str = int(raw)
+            value = int(raw)
             if value <= 0:
                 raise ValueError
         except ValueError:
