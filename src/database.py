@@ -1,0 +1,66 @@
+import sqlite3
+import threading
+from src.config import DATABASE_PATH
+
+_local = threading.local()
+
+
+def get_db() -> sqlite3.Connection:
+    conn = getattr(_local, "conn", None)
+    if conn is None:
+        conn = sqlite3.connect(DATABASE_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _local.conn = conn
+    return conn
+
+
+def init_db():
+    db = get_db()
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS packages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            traffic_limit_gb REAL NOT NULL,
+            max_devices INTEGER DEFAULT 1,
+            duration_days INTEGER NOT NULL,
+            price REAL NOT NULL,
+            groups TEXT DEFAULT '[]',
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS client_tokens (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            token TEXT NOT NULL UNIQUE,
+            name TEXT NOT NULL,
+            telegram_user_id TEXT,
+            balance REAL DEFAULT 0,
+            active INTEGER DEFAULT 1,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS subscriptions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_token_id INTEGER NOT NULL REFERENCES client_tokens(id),
+            package_id INTEGER NOT NULL REFERENCES packages(id),
+            panel_user_id TEXT NOT NULL,
+            panel_subscription_token TEXT,
+            status TEXT DEFAULT 'active' CHECK(status IN ('active','expired','deleted')),
+            expires_at TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            client_token_id INTEGER NOT NULL REFERENCES client_tokens(id),
+            amount REAL NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('topup','charge','refund')),
+            description TEXT DEFAULT '',
+            subscription_id INTEGER REFERENCES subscriptions(id),
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    db.commit()
