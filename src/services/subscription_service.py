@@ -1,13 +1,53 @@
+import logging
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 
-from src.config import PANEL_SUB_URL
+import httpx
+
+from src.config import PANEL_SUB_URL, TELEGRAM_BOT_TOKEN
 from src.models.package import get_package
 from src.models.client_token import get_client_token_by_id, update_balance
 from src.models.subscription import create_subscription, get_subscription_for_client, mark_deleted, update_expires_at
 from src.models.transaction import create_transaction
 from src.services.panel_api import create_user, delete_user, update_user
-import httpx
+
+logger = logging.getLogger(__name__)
+
+LOW_BALANCE_THRESHOLD = 1000
+
+
+def _send_telegram_message(telegram_user_id: str, text: str):
+    """Send a Telegram message in a background thread."""
+    if not TELEGRAM_BOT_TOKEN or not telegram_user_id:
+        return
+
+    def _send():
+        try:
+            import asyncio
+            from telegram import Bot
+            bot = Bot(token=TELEGRAM_BOT_TOKEN)
+            asyncio.run(bot.send_message(chat_id=int(telegram_user_id), text=text))
+        except Exception:
+            logger.warning("Failed to send Telegram notification to %s", telegram_user_id, exc_info=True)
+
+    threading.Thread(target=_send, daemon=True).start()
+
+
+def _notify_low_balance(telegram_user_id: str, new_balance: float):
+    logger.info("Low balance alert: user_tg=%s balance=%.0f", telegram_user_id, new_balance)
+    _send_telegram_message(
+        telegram_user_id,
+        f"⚠️ Ваш баланс: {new_balance:.0f}₽\n\nПополните баланс для продолжения работы.",
+    )
+
+
+def _notify_insufficient_balance(telegram_user_id: str, balance: float, required: float):
+    logger.warning("Insufficient balance: user_tg=%s balance=%.0f required=%.0f", telegram_user_id, balance, required)
+    _send_telegram_message(
+        telegram_user_id,
+        f"❌ Недостаточно средств!\n\nБаланс: {balance:.0f}₽\nТребуется: {required:.0f}₽\n\nПополните баланс для продолжения.",
+    )
 
 
 class APIError(Exception):
@@ -16,12 +56,20 @@ class APIError(Exception):
         self.status_code = status_code
 
 
+def _parse_panel_error(e: httpx.HTTPStatusError) -> str:
+    try:
+        return e.response.json().get("message", e.response.text)
+    except Exception:
+        return e.response.text
+
+
 def create_sub(client_token, package_id, user_id=None):
     pkg = get_package(package_id)
     if not pkg or not pkg["active"]:
         raise APIError("Package not found", 404)
 
     if client_token["balance"] < pkg["price"]:
+        _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], pkg["price"])
         raise APIError("Insufficient balance", 402)
 
     panel_user_id = f"api_{user_id}_{secrets.token_hex(4)}" if user_id else f"api_{secrets.token_hex(4)}_{secrets.token_hex(4)}"
@@ -36,14 +84,16 @@ def create_sub(client_token, package_id, user_id=None):
             expire_at=expires_at,
         )
     except httpx.HTTPStatusError as e:
-        detail = ""
-        try:
-            detail = e.response.json().get("message", e.response.text)
-        except Exception:
-            detail = e.response.text
+        detail = _parse_panel_error(e)
+        logger.error("Panel error on create_user: %s %s", e.response.status_code, detail)
         raise APIError(f"Panel error: {detail}", 502)
+    except httpx.ConnectError:
+        logger.error("Panel unreachable on create_user")
+        raise APIError("Panel unreachable", 502)
 
-    update_balance(client_token["id"], -pkg["price"])
+    new_balance = update_balance(client_token["id"], -pkg["price"])
+    if new_balance < LOW_BALANCE_THRESHOLD:
+        _notify_low_balance(client_token.get("telegram_user_id"), new_balance)
 
     sub = create_subscription(
         client_token_id=client_token["id"],
@@ -61,6 +111,8 @@ def create_sub(client_token, package_id, user_id=None):
         subscription_id=sub["id"],
     )
 
+    logger.info("Subscription created: id=%s client=%s pkg=%s balance=%.0f", sub["id"], client_token["id"], pkg["name"], new_balance)
+
     sub_link = f"{PANEL_SUB_URL}/api/files/{panel_user.get('subscriptionToken')}" if panel_user.get("subscriptionToken") else None
     return {**sub, "sub_link": sub_link}
 
@@ -77,6 +129,7 @@ def renew_sub(client_token, sub_id):
         raise APIError("Package not found", 404)
 
     if client_token["balance"] < pkg["price"]:
+        _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], pkg["price"])
         raise APIError("Insufficient balance", 402)
 
     # Extend from current expiry or from now if already expired
@@ -89,15 +142,17 @@ def renew_sub(client_token, sub_id):
     try:
         update_user(sub["panel_user_id"], expireAt=new_expires)
     except httpx.HTTPStatusError as e:
-        detail = ""
-        try:
-            detail = e.response.json().get("message", e.response.text)
-        except Exception:
-            detail = e.response.text
+        detail = _parse_panel_error(e)
+        logger.error("Panel error on renew update_user: %s %s", e.response.status_code, detail)
         raise APIError(f"Panel error: {detail}", 502)
+    except httpx.ConnectError:
+        logger.error("Panel unreachable on renew update_user")
+        raise APIError("Panel unreachable", 502)
 
     update_expires_at(sub_id, new_expires)
-    update_balance(client_token["id"], -pkg["price"])
+    new_balance = update_balance(client_token["id"], -pkg["price"])
+    if new_balance < LOW_BALANCE_THRESHOLD:
+        _notify_low_balance(client_token.get("telegram_user_id"), new_balance)
 
     create_transaction(
         client_token_id=client_token["id"],
@@ -106,6 +161,8 @@ def renew_sub(client_token, sub_id):
         description=f"Renew: {pkg['name']}",
         subscription_id=sub_id,
     )
+
+    logger.info("Subscription renewed: id=%s client=%s pkg=%s balance=%.0f", sub_id, client_token["id"], pkg["name"], new_balance)
 
     sub["expires_at"] = new_expires
     sub["status"] = "active"
@@ -123,8 +180,14 @@ def delete_sub(sub_id, client_token_id):
         delete_user(sub["panel_user_id"])
     except httpx.HTTPStatusError as e:
         if e.response.status_code != 404:
-            raise
+            detail = _parse_panel_error(e)
+            logger.error("Panel error on delete_user: %s %s", e.response.status_code, detail)
+            raise APIError(f"Panel error: {detail}", 502)
+    except httpx.ConnectError:
+        logger.error("Panel unreachable on delete_user")
+        raise APIError("Panel unreachable", 502)
 
     mark_deleted(sub_id)
+    logger.info("Subscription deleted: id=%s client=%s", sub_id, client_token_id)
     sub["status"] = "deleted"
     return sub

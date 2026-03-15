@@ -1,6 +1,10 @@
+import logging
+
 import httpx
 
 from src.config import PANEL_API_KEY, PANEL_API_URL
+
+logger = logging.getLogger(__name__)
 
 _client = httpx.Client(
     base_url=PANEL_API_URL,
@@ -14,6 +18,7 @@ def create_user(
 ) -> dict:
     # groups may be list of dicts {_id, name} — panel expects ObjectId strings
     group_ids = [g["_id"] if isinstance(g, dict) else g for g in groups]
+    logger.info("Creating panel user: %s groups=%s traffic=%.1fGB", user_id, group_ids, traffic_limit_gb)
     r = _client.post(
         "/api/users",
         json={
@@ -30,6 +35,7 @@ def create_user(
 
 
 def update_user(user_id: str, **fields) -> dict:
+    logger.info("Updating panel user: %s fields=%s", user_id, list(fields.keys()))
     r = _client.put(f"/api/users/{user_id}", json=fields)
     r.raise_for_status()
     return r.json()
@@ -42,6 +48,7 @@ def get_user(user_id: str) -> dict:
 
 
 def delete_user(user_id: str):
+    logger.info("Deleting panel user: %s", user_id)
     r = _client.delete(f"/api/users/{user_id}")
     r.raise_for_status()
     return r.json()
@@ -78,4 +85,5 @@ def list_groups() -> list[dict]:
         return result
 
     except Exception:
+        logger.warning("Failed to fetch groups from panel", exc_info=True)
         return []

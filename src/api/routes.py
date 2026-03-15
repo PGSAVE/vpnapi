@@ -8,7 +8,7 @@ from src.models.package import list_packages
 from src.models.subscription import list_subscriptions, get_subscription_for_client
 from src.services.subscription_service import create_sub, delete_sub, renew_sub, APIError
 
-router = APIRouter(prefix="/api/v1", dependencies=[Depends(auth_dependency)])
+router = APIRouter(prefix="/vpnapi", dependencies=[Depends(auth_dependency)])
 
 
 class CreateSubscriptionBody(BaseModel):

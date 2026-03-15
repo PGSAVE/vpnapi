@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-from src.config import PANEL_SUB_URL
+from src.config import API_BASE_URL, DOCS_PASS, DOCS_URL, PANEL_SUB_URL
 from src.models.client_token import get_client_token_by_telegram
 from src.models.package import get_package
 from src.models.subscription import (
@@ -23,7 +23,7 @@ from src.models.subscription import (
     list_subscriptions_page,
     search_subscriptions,
 )
-from src.services.subscription_service import delete_sub, renew_sub, APIError
+from src.services.subscription_service import APIError, delete_sub, renew_sub
 
 # States
 (
@@ -86,18 +86,22 @@ async def _safe_edit(q, text, markup=None):
 
 
 def _kb_main() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    rows = [
         [
-            [
-                InlineKeyboardButton("📦 Подписки", callback_data="cl_subs"),
-                InlineKeyboardButton("📊 Статистика", callback_data="cl_stats"),
-            ],
-            [InlineKeyboardButton("🔍 Поиск подписки", callback_data="cl_search")],
-        ]
-    )
+            InlineKeyboardButton("📦 Подписки", callback_data="cl_subs"),
+            InlineKeyboardButton("📊 Статистика", callback_data="cl_stats"),
+        ],
+        [InlineKeyboardButton("🔍 Поиск подписки", callback_data="cl_search")],
+        [InlineKeyboardButton("💳 Пополнить", url="https://t.me/saveroot")],
+    ]
+    if DOCS_URL:
+        rows.append([InlineKeyboardButton("📄 Документация", callback_data="cl_docs")])
+    return InlineKeyboardMarkup(rows)
 
 
-def _kb_subs(subs: list, page: int, total: int, status_filter: str | None) -> InlineKeyboardMarkup:
+def _kb_subs(
+    subs: list, page: int, total: int, status_filter: str | None
+) -> InlineKeyboardMarkup:
     rows = []
     for s in subs:
         emoji = _status_emoji(s["status"], s["expires_at"])
@@ -115,7 +119,11 @@ def _kb_subs(subs: list, page: int, total: int, status_filter: str | None) -> In
     rows.append(nav)
 
     filters_row = []
-    for f_val, f_label in [("active", "Активные"), ("expired", "Истёкшие"), (None, "Все")]:
+    for f_val, f_label in [
+        ("active", "Активные"),
+        ("expired", "Истёкшие"),
+        (None, "Все"),
+    ]:
         prefix = "● " if status_filter == f_val else ""
         cb = f"cl_filter:{f_val}" if f_val else "cl_filter:all"
         filters_row.append(InlineKeyboardButton(f"{prefix}{f_label}", callback_data=cb))
@@ -132,8 +140,12 @@ def _kb_sub_detail(sub: dict) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("🔗 Ссылка подписки", url=link)])
     if sub["status"] != "deleted":
         action_row = []
-        action_row.append(InlineKeyboardButton("🔄 Продлить", callback_data=f"cl_renew:{sub['id']}"))
-        action_row.append(InlineKeyboardButton("🗑 Удалить", callback_data=f"cl_delete:{sub['id']}"))
+        action_row.append(
+            InlineKeyboardButton("🔄 Продлить", callback_data=f"cl_renew:{sub['id']}")
+        )
+        action_row.append(
+            InlineKeyboardButton("🗑 Удалить", callback_data=f"cl_delete:{sub['id']}")
+        )
         rows.append(action_row)
     rows.append([InlineKeyboardButton("🔙 К подпискам", callback_data="cl_back_subs")])
     return InlineKeyboardMarkup(rows)
@@ -147,9 +159,13 @@ def _kb_sub_detail(sub: dict) -> InlineKeyboardMarkup:
 def _fmt_sub_detail(s: dict) -> str:
     days = _days_left(s["expires_at"])
     emoji = _status_emoji(s["status"], s["expires_at"])
-    status_text = {"active": "Активна", "expired": "Истекла", "deleted": "Удалена"}.get(s["status"], s["status"])
+    status_text = {"active": "Активна", "expired": "Истекла", "deleted": "Удалена"}.get(
+        s["status"], s["status"]
+    )
 
-    traffic = "Безлимит" if not s.get("traffic_limit_gb") else f"{s['traffic_limit_gb']} GB"
+    traffic = (
+        "Безлимит" if not s.get("traffic_limit_gb") else f"{s['traffic_limit_gb']} GB"
+    )
     lines = [
         f"{emoji} *Подписка #{s['id']}*",
         f"Пакет: *{_esc(s.get('package_name', '?'))}*",
@@ -200,7 +216,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
 
     _ud(ctx)["ct_id"] = ct["id"]
-    await update.message.reply_text(_main_text(ct), parse_mode="Markdown", reply_markup=_kb_main())
+    await update.message.reply_text(
+        _main_text(ct), parse_mode="Markdown", reply_markup=_kb_main()
+    )
     return CLIENT_MAIN
 
 
@@ -243,6 +261,15 @@ async def on_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         await _safe_edit(q, text, markup)
         return CLIENT_MAIN
 
+    if data == "cl_docs":
+        docs_link = f"{API_BASE_URL}/{DOCS_URL}"
+        text = f"📄 *Документация API*\n\nСсылка: {docs_link}\nПароль: `{DOCS_PASS}`"
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
+        )
+        await _safe_edit(q, text, markup)
+        return CLIENT_MAIN
+
     if data == "cl_search":
         await q.edit_message_text(
             "🔍 *Поиск подписки*\n\n"
@@ -262,10 +289,20 @@ async def _render_subs(q, ud, ct) -> int:
     page = ud.get("page", 0)
     status_filter = ud.get("filter")
     total = count_subscriptions(ct["id"], status=status_filter)
-    subs = list_subscriptions_page(ct["id"], offset=page * PAGE_SIZE, limit=PAGE_SIZE, status_filter=status_filter)
+    subs = list_subscriptions_page(
+        ct["id"], offset=page * PAGE_SIZE, limit=PAGE_SIZE, status_filter=status_filter
+    )
     total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
-    text = f"📦 *Подписки* (стр. {page + 1}/{total_pages})" if subs else "📦 *Подписки*\n\n_Нет подписок_"
-    await q.edit_message_text(text, parse_mode="Markdown", reply_markup=_kb_subs(subs, page, total, status_filter))
+    text = (
+        f"📦 *Подписки* (стр. {page + 1}/{total_pages})"
+        if subs
+        else "📦 *Подписки*\n\n_Нет подписок_"
+    )
+    await q.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=_kb_subs(subs, page, total, status_filter),
+    )
     return CLIENT_SUBS
 
 
@@ -303,7 +340,9 @@ async def on_subs(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             return CLIENT_SUBS
         _enrich_sub(sub)
         await q.edit_message_text(
-            _fmt_sub_detail(sub), parse_mode="Markdown", reply_markup=_kb_sub_detail(sub),
+            _fmt_sub_detail(sub),
+            parse_mode="Markdown",
+            reply_markup=_kb_sub_detail(sub),
         )
         return CLIENT_SUB_DETAIL
 
@@ -340,12 +379,16 @@ async def on_sub_detail(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         duration = pkg["duration_days"] if pkg else 0
         ud["confirm_action"] = "renew"
         ud["confirm_sub_id"] = sub_id
-        markup = InlineKeyboardMarkup([
+        markup = InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("✅ Да, продлить", callback_data="cl_confirm_yes"),
-                InlineKeyboardButton("❌ Отмена", callback_data="cl_confirm_no"),
+                [
+                    InlineKeyboardButton(
+                        "✅ Да, продлить", callback_data="cl_confirm_yes"
+                    ),
+                    InlineKeyboardButton("❌ Отмена", callback_data="cl_confirm_no"),
+                ]
             ]
-        ])
+        )
         await q.edit_message_text(
             f"🔄 *Продление подписки #{sub_id}*\n\n"
             f"Пакет: *{_esc(sub.get('package_name', '?'))}*\n"
@@ -353,7 +396,8 @@ async def on_sub_detail(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"Срок: `+{duration} дн.`\n"
             f"Ваш баланс: `{ct['balance']} ₽`\n\n"
             "Подтвердите продление:",
-            parse_mode="Markdown", reply_markup=markup,
+            parse_mode="Markdown",
+            reply_markup=markup,
         )
         return CLIENT_CONFIRM
 
@@ -361,17 +405,22 @@ async def on_sub_detail(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         sub_id = int(data.split(":")[1])
         ud["confirm_action"] = "delete"
         ud["confirm_sub_id"] = sub_id
-        markup = InlineKeyboardMarkup([
+        markup = InlineKeyboardMarkup(
             [
-                InlineKeyboardButton("✅ Да, удалить", callback_data="cl_confirm_yes"),
-                InlineKeyboardButton("❌ Отмена", callback_data="cl_confirm_no"),
+                [
+                    InlineKeyboardButton(
+                        "✅ Да, удалить", callback_data="cl_confirm_yes"
+                    ),
+                    InlineKeyboardButton("❌ Отмена", callback_data="cl_confirm_no"),
+                ]
             ]
-        ])
+        )
         await q.edit_message_text(
             f"🗑 *Удаление подписки #{sub_id}*\n\n"
             "Подписка будет удалена без возможности восстановления.\n"
             "Подтвердите удаление:",
-            parse_mode="Markdown", reply_markup=markup,
+            parse_mode="Markdown",
+            reply_markup=markup,
         )
         return CLIENT_CONFIRM
 
@@ -399,7 +448,9 @@ async def on_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             if sub:
                 _enrich_sub(sub)
                 await q.edit_message_text(
-                    _fmt_sub_detail(sub), parse_mode="Markdown", reply_markup=_kb_sub_detail(sub),
+                    _fmt_sub_detail(sub),
+                    parse_mode="Markdown",
+                    reply_markup=_kb_sub_detail(sub),
                 )
                 return CLIENT_SUB_DETAIL
         await _safe_edit(q, _main_text(ct), _kb_main())
@@ -412,14 +463,21 @@ async def on_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 _enrich_sub(sub)
                 await q.edit_message_text(
                     f"✅ *Подписка #{sub_id} продлена!*\n\n" + _fmt_sub_detail(sub),
-                    parse_mode="Markdown", reply_markup=_kb_sub_detail(sub),
+                    parse_mode="Markdown",
+                    reply_markup=_kb_sub_detail(sub),
                 )
             except APIError as e:
                 await q.edit_message_text(
                     f"❌ Ошибка: {_esc(str(e))}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "🔙 Меню", callback_data="cl_back_main"
+                                )
+                            ]
+                        ]
                     ),
                 )
                 return CLIENT_MAIN
@@ -432,7 +490,14 @@ async def on_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                     f"🗑 *Подписка #{sub_id} удалена.*",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🔙 К подпискам", callback_data="cl_back_subs_from_confirm")]]
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "🔙 К подпискам",
+                                    callback_data="cl_back_subs_from_confirm",
+                                )
+                            ]
+                        ]
                     ),
                 )
             except APIError as e:
@@ -440,7 +505,13 @@ async def on_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                     f"❌ Ошибка: {_esc(str(e))}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
+                        [
+                            [
+                                InlineKeyboardButton(
+                                    "🔙 Меню", callback_data="cl_back_main"
+                                )
+                            ]
+                        ]
                     ),
                 )
             return CLIENT_MAIN
@@ -468,7 +539,9 @@ async def on_search_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
         if sub:
             _enrich_sub(sub)
             await update.message.reply_text(
-                _fmt_sub_detail(sub), parse_mode="Markdown", reply_markup=_kb_sub_detail(sub),
+                _fmt_sub_detail(sub),
+                parse_mode="Markdown",
+                reply_markup=_kb_sub_detail(sub),
             )
             return CLIENT_SUB_DETAIL
 
@@ -480,7 +553,8 @@ async def on_search_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
         )
         await update.message.reply_text(
             f"🔍 По запросу `{_esc(query)}` ничего не найдено.",
-            parse_mode="Markdown", reply_markup=markup,
+            parse_mode="Markdown",
+            reply_markup=markup,
         )
         return CLIENT_MAIN
 
@@ -494,7 +568,8 @@ async def on_search_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
 
     await update.message.reply_text(
         f"🔍 Найдено: `{len(results)}`",
-        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(rows),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(rows),
     )
     return CLIENT_SUBS
 
@@ -513,7 +588,7 @@ def register(app) -> None:
             CLIENT_MAIN: [
                 CallbackQueryHandler(
                     on_main,
-                    pattern="^(cl_subs|cl_stats|cl_search|cl_back_main|cl_back_subs_from_confirm)$",
+                    pattern="^(cl_subs|cl_stats|cl_search|cl_docs|cl_back_main|cl_back_subs_from_confirm)$",
                 ),
             ],
             CLIENT_SUBS: [
