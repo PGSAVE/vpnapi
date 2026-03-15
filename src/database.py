@@ -46,6 +46,27 @@ def close_all():
 
 atexit.register(close_all)
 
+_checkpoint_timer = None
+
+
+def _periodic_checkpoint():
+    """Run WAL checkpoint every 5 minutes."""
+    global _checkpoint_timer
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        conn.close()
+        log.debug("Periodic WAL checkpoint done")
+    except Exception:
+        log.warning("Periodic WAL checkpoint failed", exc_info=True)
+    _checkpoint_timer = threading.Timer(300, _periodic_checkpoint)
+    _checkpoint_timer.daemon = True
+    _checkpoint_timer.start()
+
+
+def start_periodic_checkpoint():
+    _periodic_checkpoint()
+
 
 def init_db():
     db = get_db()

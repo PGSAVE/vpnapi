@@ -14,9 +14,17 @@ logging.basicConfig(
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
+from contextlib import asynccontextmanager
+
 from src.api.routes import router
 from src.config import DOCS_PASS, DOCS_URL, PORT, TELEGRAM_BOT_TOKEN
-from src.database import init_db
+from src.database import close_all, init_db, start_periodic_checkpoint
+
+
+@asynccontextmanager
+async def lifespan(application):
+    yield
+    close_all()
 
 docs_path = f"/{DOCS_URL}" if DOCS_URL else "/docs"
 app = FastAPI(
@@ -25,6 +33,7 @@ app = FastAPI(
     version="1.0.0",
     docs_url=docs_path,
     redoc_url=None,
+    lifespan=lifespan,
 )
 app.include_router(router)
 
@@ -89,6 +98,7 @@ def run_bot():
 
 def main():
     init_db()
+    start_periodic_checkpoint()
     print("Database initialized")
 
     if TELEGRAM_BOT_TOKEN:
