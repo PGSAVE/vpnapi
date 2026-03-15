@@ -313,10 +313,14 @@ async def on_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         return CLIENT_MAIN
 
     if data == "cl_search":
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔙 Меню", callback_data="cl_search_back")]]
+        )
         await q.edit_message_text(
             "🔍 *Поиск подписки*\n\n"
             "Введите ID подписки, panel user ID или название пакета:",
             parse_mode="Markdown",
+            reply_markup=markup,
         )
         return CLIENT_SEARCH
 
@@ -616,6 +620,18 @@ async def on_search_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int
     return CLIENT_SUBS
 
 
+async def on_search_back(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    if q is None:
+        return CLIENT_SEARCH
+    await q.answer()
+    ct = _get_ct(update)
+    if not ct:
+        return ConversationHandler.END
+    await _safe_edit(q, _main_text(ct), _kb_main())
+    return CLIENT_MAIN
+
+
 # ---------------------------------------------------------------------------
 # Registration
 # ---------------------------------------------------------------------------
@@ -652,6 +668,7 @@ def register(app) -> None:
                 ),
             ],
             CLIENT_SEARCH: [
+                CallbackQueryHandler(on_search_back, pattern="^cl_search_back$"),
                 MessageHandler(_txt, on_search_input),
             ],
         },
