@@ -36,11 +36,9 @@ from src.services.subscription_service import APIError, delete_sub, renew_sub
 
 PAGE_SIZE = 8
 
-_MD = str.maketrans({"_": r"\_", "*": r"\*", "`": r"\`", "[": r"\["})
-
-
 def _esc(text: str) -> str:
-    return str(text).translate(_MD)
+    """Escape for Telegram Markdown v1 — only escape *, `, [."""
+    return str(text).replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
 
 
 def _get_ct(update: Update):

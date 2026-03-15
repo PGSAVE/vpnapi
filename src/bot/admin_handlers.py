@@ -213,11 +213,9 @@ def kb_skip(cb: str) -> InlineKeyboardMarkup:
 # Text formatters
 # ---------------------------------------------------------------------------
 
-_MD = str.maketrans({"_": r"\_", "*": r"\*", "`": r"\`", "[": r"\["})
-
-
 def _esc(text: str) -> str:
-    return str(text).translate(_MD)
+    """Escape for Telegram Markdown v1 — only escape *, `, [."""
+    return str(text).replace("*", "\\*").replace("`", "\\`").replace("[", "\\[")
 
 
 def fmt_pkg(p: dict) -> str:
