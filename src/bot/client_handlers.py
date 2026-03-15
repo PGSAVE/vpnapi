@@ -15,7 +15,7 @@ from telegram.ext import (
 
 from src.config import API_BASE_URL, DOCS_PASS, DOCS_URL, PANEL_SUB_URL
 from src.models.client_token import get_client_token_by_telegram
-from src.models.package import get_package
+from src.models.package import get_package, list_packages
 from src.models.subscription import (
     count_subscriptions,
     get_client_stats,
@@ -89,7 +89,10 @@ def _kb_main() -> InlineKeyboardMarkup:
             InlineKeyboardButton("📦 Подписки", callback_data="cl_subs"),
             InlineKeyboardButton("📊 Статистика", callback_data="cl_stats"),
         ],
-        [InlineKeyboardButton("🔍 Поиск подписки", callback_data="cl_search")],
+        [
+            InlineKeyboardButton("🔍 Поиск подписки", callback_data="cl_search"),
+            InlineKeyboardButton("🏷 Тарифы", callback_data="cl_tariffs"),
+        ],
         [InlineKeyboardButton("💳 Пополнить", url="https://t.me/saveroot")],
     ]
     if DOCS_URL:
@@ -267,6 +270,28 @@ async def on_main(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
             f"Пароль: `{DOCS_PASS}`\n\n"
             f"Ваш токен: `{ct['token']}`"
         )
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
+        )
+        await _safe_edit(q, text, markup)
+        return CLIENT_MAIN
+
+    if data == "cl_tariffs":
+        pkgs = list_packages(active_only=True)
+        if not pkgs:
+            text = "🏷 *Тарифы*\n\n_Нет доступных тарифов_"
+        else:
+            lines = ["🏷 *Тарифы*\n"]
+            for p in pkgs:
+                traffic = "Безлимит" if not p["traffic_limit_gb"] else f"{p['traffic_limit_gb']} GB"
+                lines.append(
+                    f"▫️ *{_esc(p['name'])}*\n"
+                    f"   Цена: `{p['price']:.0f} ₽`\n"
+                    f"   Срок: `{p['duration_days']} дн.`\n"
+                    f"   Трафик: `{traffic}`\n"
+                    f"   Устройств: `{p['max_devices']}`"
+                )
+            text = "\n".join(lines)
         markup = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
         )
@@ -591,7 +616,7 @@ def register(app) -> None:
             CLIENT_MAIN: [
                 CallbackQueryHandler(
                     on_main,
-                    pattern="^(cl_subs|cl_stats|cl_search|cl_docs|cl_back_main|cl_back_subs_from_confirm)$",
+                    pattern="^(cl_subs|cl_stats|cl_search|cl_tariffs|cl_docs|cl_back_main|cl_back_subs_from_confirm)$",
                 ),
             ],
             CLIENT_SUBS: [
