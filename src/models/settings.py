@@ -1,10 +1,14 @@
+import sqlite3
 from src.database import get_db
 from src.config import EXTRA_DEVICE_SURCHARGE_PCT as _DEFAULT_SURCHARGE, BASE_DEVICES_INCLUDED as _DEFAULT_BASE_DEVICES
 
 
 def get_setting(key, default=None):
-    row = get_db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    return row["value"] if row else default
+    try:
+        row = get_db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+    except sqlite3.OperationalError:
+        return default
 
 
 def set_setting(key, value):
