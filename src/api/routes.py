@@ -6,7 +6,7 @@ from src.api.middleware import auth_dependency
 from src.config import PANEL_SUB_URL
 from src.models.package import list_packages
 from src.models.subscription import list_subscriptions, get_subscription_for_client
-from src.services.subscription_service import create_sub, delete_sub, renew_sub, APIError
+from src.services.subscription_service import create_sub, delete_sub, renew_sub, update_sub_devices, APIError
 
 router = APIRouter(prefix="/vpnapi", dependencies=[Depends(auth_dependency)])
 
@@ -15,6 +15,11 @@ class CreateSubscriptionBody(BaseModel):
     packageId: int = Field(..., description="ID тарифного пакета")
     userId: Optional[str] = Field(None, description="Идентификатор пользователя (опционально). Если не указан, генерируется автоматически")
     days: Optional[int] = Field(None, description="Количество дней (обязательно для гибких тарифов, где срок не фиксирован)")
+    devices: Optional[int] = Field(None, description="Количество устройств. 0 — стандартное (панель решает). Докупка сверх базовой комплектации — с наценкой")
+
+
+class UpdateDevicesBody(BaseModel):
+    devices: int = Field(..., description="Количество устройств. 0 — сброс на стандартное значение панели")
 
 
 @router.get(
@@ -57,7 +62,7 @@ def get_balance(ct=Depends(auth_dependency)):
 )
 def post_subscription(body: CreateSubscriptionBody, ct=Depends(auth_dependency)):
     try:
-        return create_sub(ct, body.packageId, body.userId, body.days)
+        return create_sub(ct, body.packageId, body.userId, body.days, body.devices)
     except APIError as e:
         raise HTTPException(e.status_code, str(e))
 
@@ -107,6 +112,27 @@ def renew_subscription(sub_id: int, days: Optional[int] = None, ct=Depends(auth_
     try:
         sub = renew_sub(ct, sub_id, days=days)
         return {"success": True, "subscription": sub}
+    except APIError as e:
+        raise HTTPException(e.status_code, str(e))
+
+
+@router.put(
+    "/subscriptions/{sub_id}/devices",
+    summary="Изменить количество устройств",
+    description="Изменяет количество устройств в подписке. "
+    "0 — сброс на стандартное значение панели. "
+    "Докупка устройств сверх базовой комплектации оплачивается с наценкой пропорционально оставшимся дням.",
+    responses={
+        200: {"description": "Количество устройств обновлено"},
+        400: {"description": "Невалидный запрос"},
+        402: {"description": "Недостаточно средств на балансе"},
+        404: {"description": "Подписка не найдена"},
+        502: {"description": "Ошибка панели управления"},
+    },
+)
+def put_subscription_devices(sub_id: int, body: UpdateDevicesBody, ct=Depends(auth_dependency)):
+    try:
+        return update_sub_devices(ct, sub_id, body.devices)
     except APIError as e:
         raise HTTPException(e.status_code, str(e))
 

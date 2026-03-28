@@ -13,6 +13,7 @@ from telegram.ext import (
 )
 
 from src.config import ADMIN_TELEGRAM_ID
+from src.models.settings import get_extra_device_surcharge_pct, get_base_devices_included, set_setting
 from src.models.client_token import (
     create_client_token,
     get_client_token_by_id,
@@ -54,7 +55,8 @@ log = logging.getLogger(__name__)
     TOKEN_DETAIL,
     TOKEN_TOPUP_AMOUNT,
     STATS,
-) = range(19)
+    SETTINGS_EDIT_VALUE,
+) = range(20)
 
 # ---------------------------------------------------------------------------
 # Auth / helpers
@@ -102,6 +104,10 @@ def kb_packages(pkgs: list) -> InlineKeyboardMarkup:
             ]
         )
     rows.append([InlineKeyboardButton("➕ Создать пакет", callback_data="pkg_create")])
+    rows.append([
+        InlineKeyboardButton("📱 Базовые устройства", callback_data="set:base_devices_included"),
+        InlineKeyboardButton("💲 Наценка %", callback_data="set:extra_device_surcharge_pct"),
+    ])
     rows.append([InlineKeyboardButton("🔙 Главное меню", callback_data="back_main")])
     return InlineKeyboardMarkup(rows)
 
@@ -277,7 +283,14 @@ async def _show_main(update: Update) -> None:
 
 async def _show_packages(update: Update) -> None:
     pkgs = list_packages(active_only=False)
-    await _edit_or_reply(update, "📦 *Пакеты*", kb_packages(pkgs))
+    base_devs = get_base_devices_included()
+    surcharge = get_extra_device_surcharge_pct()
+    text = (
+        "📦 *Пакеты*\n\n"
+        f"Базовое кол-во устройств на пакет: `{base_devs}`\n"
+        f"Наценка за дополнительное устройство: `{surcharge:.0f}%`"
+    )
+    await _edit_or_reply(update, text, kb_packages(pkgs))
 
 
 async def _show_tokens(update: Update) -> None:
@@ -363,7 +376,10 @@ async def _show_stats(update: Update) -> None:
         f"  Пополнения: `{topups_all} ₽`\n"
         f"  Списания: `{charges_all} ₽`\n"
         f"  Возвраты: `{refunds_all} ₽`\n\n"
-        f"*Топ пакетов по продажам*\n{top_lines}"
+        f"*Топ пакетов по продажам*\n{top_lines}\n\n"
+        f"*Настройки устройств*\n"
+        f"  Базовая комплектация: `{get_base_devices_included()}` устр.\n"
+        f"  Наценка за доп. устройство: `{get_extra_device_surcharge_pct():.0f}%` от цены тарифа"
     )
     markup = InlineKeyboardMarkup(
         [
@@ -464,6 +480,27 @@ async def on_packages(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         ud["pkg_id"] = pkg_id
         await _show_pkg_detail(update, pkg_id)
         return PKG_DETAIL
+
+    if data.startswith("set:"):
+        setting_key = data.split(":")[1]
+        ud["setting_key"] = setting_key
+        if setting_key == "base_devices_included":
+            current = get_base_devices_included()
+            await q.edit_message_text(
+                f"📱 *Базовое кол-во устройств*\n\n"
+                f"Текущее значение: `{current}`\n\n"
+                f"Введите новое значение (целое число):",
+                parse_mode="Markdown",
+            )
+        else:
+            current = get_extra_device_surcharge_pct()
+            await q.edit_message_text(
+                f"💲 *Наценка за доп. устройство*\n\n"
+                f"Текущее значение: `{current:.0f}%`\n\n"
+                f"Введите новое значение в процентах (например: `50`):",
+                parse_mode="Markdown",
+            )
+        return SETTINGS_EDIT_VALUE
 
     await _show_packages(update)
     return PACKAGES
@@ -1087,6 +1124,61 @@ async def on_token_topup_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE) 
 
 
 # ---------------------------------------------------------------------------
+# SETTINGS EDIT VALUE
+# ---------------------------------------------------------------------------
+
+
+async def on_settings_edit_value(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    if not update.message:
+        return SETTINGS_EDIT_VALUE
+    ud = _ud(ctx)
+    setting_key = ud.get("setting_key")
+    raw = (update.message.text or "").strip()
+
+    if not setting_key:
+        await update.message.reply_text("⚠️ Ошибка состояния. Используйте /admin")
+        return ConversationHandler.END
+
+    if setting_key == "base_devices_included":
+        try:
+            val = int(raw)
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Введите целое неотрицательное число.", parse_mode="Markdown"
+            )
+            return SETTINGS_EDIT_VALUE
+        set_setting("base_devices_included", val)
+        label = "Базовое кол-во устройств"
+    else:
+        try:
+            val = float(raw.replace(",", "."))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "❌ Введите число, например: `50`", parse_mode="Markdown"
+            )
+            return SETTINGS_EDIT_VALUE
+        set_setting("extra_device_surcharge_pct", val)
+        label = "Наценка за доп. устройство"
+
+    ud.pop("setting_key", None)
+    pkgs = list_packages(active_only=False)
+    base_devs = get_base_devices_included()
+    surcharge = get_extra_device_surcharge_pct()
+    text = (
+        f"✅ *{label}* обновлено.\n\n"
+        "📦 *Пакеты*\n\n"
+        f"Базовое кол-во устройств на пакет: `{base_devs}`\n"
+        f"Наценка за дополнительное устройство: `{surcharge:.0f}%`"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb_packages(pkgs))
+    return PACKAGES
+
+
+# ---------------------------------------------------------------------------
 # STATS
 # ---------------------------------------------------------------------------
 
@@ -1123,7 +1215,7 @@ def register(app) -> None:
             PACKAGES: [
                 CallbackQueryHandler(
                     on_packages,
-                    pattern="^(back_main|pkg_create|pkg_detail:\\d+)$",
+                    pattern="^(back_main|pkg_create|pkg_detail:\\d+|set:\\w+)$",
                 ),
             ],
             PKG_CREATE_NAME: [
@@ -1191,6 +1283,9 @@ def register(app) -> None:
             ],
             TOKEN_TOPUP_AMOUNT: [
                 MessageHandler(_txt, on_token_topup_amount),
+            ],
+            SETTINGS_EDIT_VALUE: [
+                MessageHandler(_txt, on_settings_edit_value),
             ],
             STATS: [
                 CallbackQueryHandler(on_stats, pattern="^(back_main|stats_refresh)$"),
