@@ -1,4 +1,5 @@
 import logging
+import math
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
@@ -10,7 +11,7 @@ from src.models.settings import get_extra_device_surcharge_pct, get_base_devices
 from src.models.package import get_package
 from src.models.client_token import get_client_token_by_id, update_balance
 from src.models.subscription import create_subscription, get_subscription_for_client, mark_deleted, update_expires_at
-from src.models.transaction import create_transaction
+from src.models.transaction import create_transaction, get_subscription_charges
 from src.services.panel_api import create_user, delete_user, update_user
 
 logger = logging.getLogger(__name__)
@@ -295,12 +296,61 @@ def update_sub_devices(client_token, sub_id, devices):
     return {"success": True, "devices": devices, "surcharge": round(surcharge, 2)}
 
 
+def calc_refund(sub):
+    """Calculate refund amount for unused days of a subscription.
+
+    Returns 0 if no refund is applicable:
+    - subscription is not active or already expired
+    - less than 7 days remaining
+    - more than 15% of total duration has been used
+    """
+    if sub["status"] != "active":
+        return 0
+
+    now = datetime.now(timezone.utc)
+    created = datetime.fromisoformat(sub["created_at"].replace("Z", "+00:00"))
+    expires = datetime.fromisoformat(sub["expires_at"].replace("Z", "+00:00"))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+
+    if expires <= now:
+        return 0
+
+    total_seconds = (expires - created).total_seconds()
+    if total_seconds <= 0:
+        return 0
+
+    used_seconds = (now - created).total_seconds()
+    remaining_seconds = (expires - now).total_seconds()
+
+    remaining_days = remaining_seconds / 86400
+    total_days = total_seconds / 86400
+    used_days = used_seconds / 86400
+
+    if remaining_days < 7:
+        return 0
+
+    if used_days / total_days > 0.15:
+        return 0
+
+    total_paid = get_subscription_charges(sub["id"])
+    if total_paid <= 0:
+        return 0
+
+    refund = math.floor(total_paid * remaining_days / total_days)
+    return max(refund, 0)
+
+
 def delete_sub(sub_id, client_token_id):
     sub = get_subscription_for_client(sub_id, client_token_id)
     if not sub:
         raise APIError("Subscription not found", 404)
     if sub["status"] == "deleted":
         raise APIError("Already deleted", 400)
+
+    refund = calc_refund(sub)
 
     try:
         delete_user(sub["panel_user_id"])
@@ -313,7 +363,18 @@ def delete_sub(sub_id, client_token_id):
         logger.error("Panel unreachable on delete_user")
         raise APIError("Panel unreachable", 502)
 
+    if refund > 0:
+        update_balance(client_token_id, refund)
+        create_transaction(
+            client_token_id=client_token_id,
+            amount=refund,
+            tx_type="refund",
+            description=f"Возврат: подписка #{sub_id} ({refund}₽)",
+            subscription_id=sub_id,
+        )
+
     mark_deleted(sub_id)
-    logger.info("Subscription deleted: id=%s client=%s", sub_id, client_token_id)
+    logger.info("Subscription deleted: id=%s client=%s refund=%s", sub_id, client_token_id, refund)
     sub["status"] = "deleted"
+    sub["refund"] = refund
     return sub

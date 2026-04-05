@@ -23,7 +23,7 @@ from src.models.subscription import (
     list_subscriptions_page,
     search_subscriptions,
 )
-from src.services.subscription_service import APIError, delete_sub, renew_sub
+from src.services.subscription_service import APIError, calc_refund, delete_sub, renew_sub
 
 # States
 (
@@ -461,9 +461,16 @@ async def on_sub_detail(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
                 ]
             ]
         )
+        sub = get_subscription_for_client(sub_id, ct["id"])
+        refund = calc_refund(sub) if sub else 0
+        if refund > 0:
+            refund_text = f"Возврат на баланс: `{refund} ₽`"
+        else:
+            refund_text = "Возврат средств не предусмотрен."
         await q.edit_message_text(
             f"🗑 *Удаление подписки #{sub_id}*\n\n"
             "Подписка будет удалена без возможности восстановления.\n"
+            f"{refund_text}\n"
             "Подтвердите удаление:",
             parse_mode="Markdown",
             reply_markup=markup,
@@ -532,8 +539,10 @@ async def on_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         if action == "delete":
             try:
                 sub = delete_sub(sub_id, ct["id"])
+                refund = sub.get("refund", 0)
+                refund_msg = f"\nВозврат на баланс: {refund} ₽" if refund > 0 else ""
                 await q.edit_message_text(
-                    f"🗑 *Подписка #{sub_id} удалена.*",
+                    f"🗑 *Подписка #{sub_id} удалена.*{refund_msg}",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(
                         [

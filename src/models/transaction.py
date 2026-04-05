@@ -10,6 +10,15 @@ def create_transaction(client_token_id, amount, tx_type, description="", subscri
     db.commit()
 
 
+def get_subscription_charges(subscription_id):
+    """Return total amount charged for a subscription (positive value)."""
+    row = get_db().execute(
+        "SELECT COALESCE(SUM(ABS(amount)), 0) as total FROM transactions WHERE subscription_id=? AND type='charge'",
+        (subscription_id,),
+    ).fetchone()
+    return row["total"]
+
+
 def get_stats():
     db = get_db()
     rows = db.execute("SELECT type, SUM(amount) as total FROM transactions GROUP BY type").fetchall()
