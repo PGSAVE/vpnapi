@@ -142,7 +142,6 @@ def _migrate_to_remnawave(db: sqlite3.Connection):
     """
     # 1. Add new columns to legacy `subscriptions` tables.
     cols = _column_names(db, "subscriptions")
-    legacy_db = "panel" not in cols  # table existed without our new columns
     alters = {
         "panel": "ALTER TABLE subscriptions ADD COLUMN panel TEXT",
         "panel_uuid": "ALTER TABLE subscriptions ADD COLUMN panel_uuid TEXT",
@@ -153,11 +152,13 @@ def _migrate_to_remnawave(db: sqlite3.Connection):
         if col not in cols:
             db.execute(stmt)
 
-    # 2. Every subscription that existed before this migration was created on
-    #    Celerity. New rows are inserted with panel='remnawave' explicitly.
-    if legacy_db:
-        db.execute("UPDATE subscriptions SET panel='celerity' WHERE panel IS NULL")
-        log.info("Tagged existing subscriptions as Celerity (legacy)")
+    # 2. Every subscription that predates this migration was created on Celerity.
+    #    New rows are inserted with panel='remnawave' explicitly, so any NULL is
+    #    by definition a legacy row. Backfill unconditionally (idempotent) so a
+    #    partially-migrated database never leaves rows in limbo.
+    cur = db.execute("UPDATE subscriptions SET panel='celerity' WHERE panel IS NULL")
+    if cur.rowcount:
+        log.info("Tagged %d existing subscriptions as Celerity (legacy)", cur.rowcount)
     db.commit()
 
     # 3. Assign the default main squad to all packages (one-time).
