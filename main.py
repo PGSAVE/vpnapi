@@ -73,27 +73,33 @@ app.add_middleware(DocsBasicAuthMiddleware)
 
 
 def run_bot():
+    import time
     from telegram.ext import ApplicationBuilder
 
     from src.bot import admin_handlers, client_handlers
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    while True:
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-    application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
-    admin_handlers.register(application)
-    client_handlers.register(application)
+            application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+            admin_handlers.register(application)
+            client_handlers.register(application)
 
-    print("Telegram bot started")
+            print("Telegram bot started")
 
-    async def _run():
-        await application.initialize()
-        await application.start()
-        await application.updater.start_polling(drop_pending_updates=True)
-        # Keep alive until the daemon thread is torn down on process exit
-        await asyncio.Event().wait()
+            async def _run():
+                await application.initialize()
+                await application.start()
+                await application.updater.start_polling(drop_pending_updates=True)
+                # Keep alive until the daemon thread is torn down on process exit
+                await asyncio.Event().wait()
 
-    loop.run_until_complete(_run())
+            loop.run_until_complete(_run())
+        except Exception as e:
+            logging.error(f"Bot thread crashed: {e}, retrying in 15s...")
+            time.sleep(15)
 
 
 def main():
