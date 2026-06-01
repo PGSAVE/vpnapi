@@ -1,5 +1,6 @@
 import logging
 import math
+import re
 import secrets
 import threading
 from datetime import datetime, timedelta, timezone
@@ -10,9 +11,23 @@ from src.config import PANEL_SUB_URL, TELEGRAM_BOT_TOKEN
 from src.models.settings import get_extra_device_surcharge_pct, get_base_devices_included
 from src.models.package import get_package
 from src.models.client_token import get_client_token_by_id, update_balance
-from src.models.subscription import create_subscription, get_subscription_for_client, mark_deleted, update_expires_at
+from src.models.subscription import (
+    create_subscription,
+    get_subscription,
+    get_subscription_for_client,
+    mark_deleted,
+    set_migrated_to,
+    update_expires_at,
+)
 from src.models.transaction import create_transaction, get_subscription_charges
-from src.services.panel_api import create_user, delete_user, update_user
+from src.services.panel_api import (
+    create_user,
+    delete_user,
+    update_user,
+    get_hwid_devices,
+    delete_hwid_device,
+    delete_all_hwid_devices,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +75,69 @@ class APIError(Exception):
 
 def _parse_panel_error(e: httpx.HTTPStatusError) -> str:
     try:
-        return e.response.json().get("message", e.response.text)
+        body = e.response.json()
+        return body.get("message") or body.get("error") or e.response.text
     except Exception:
         return e.response.text
+
+
+def _iso_z(dt: datetime) -> str:
+    """Serialize a datetime to ISO-8601 with a trailing Z (Remnawave format)."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_dt(value: str) -> datetime:
+    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _make_username(user_id=None) -> str:
+    """Build a Remnawave-safe username (6-34 chars, [A-Za-z0-9_-])."""
+    suffix = secrets.token_hex(4)
+    base = f"api_{user_id}_{suffix}" if user_id else f"api_{suffix}_{secrets.token_hex(4)}"
+    base = re.sub(r"[^A-Za-z0-9_-]", "", base)[:34]
+    if len(base) < 6:
+        base = (base + secrets.token_hex(4))[:34]
+    return base
+
+
+def sub_link(sub: dict) -> str | None:
+    """Resolve a subscription's public link for any panel."""
+    if sub.get("sub_url"):
+        return sub["sub_url"]
+    if sub.get("panel_subscription_token"):
+        # Legacy Celerity link format.
+        return f"{PANEL_SUB_URL}/api/files/{sub['panel_subscription_token']}"
+    return None
+
+
+def _is_legacy(sub: dict) -> bool:
+    return sub.get("panel") == "celerity"
+
+
+def _require_remnawave(sub: dict):
+    if _is_legacy(sub) or not sub.get("panel_uuid"):
+        raise APIError(
+            "Операция недоступна для старой подписки. Замените ссылку на новую (миграция).",
+            400,
+        )
+
+
+def _panel_call(fn, *args, action: str, **kwargs):
+    """Invoke a panel API call, translating httpx errors into APIError."""
+    try:
+        return fn(*args, **kwargs)
+    except httpx.HTTPStatusError as e:
+        detail = _parse_panel_error(e)
+        logger.error("Panel error on %s: %s %s", action, e.response.status_code, detail)
+        raise APIError(f"Panel error: {detail}", 502)
+    except httpx.ConnectError:
+        logger.error("Panel unreachable on %s", action)
+        raise APIError("Panel unreachable", 502)
 
 
 def _calc_device_surcharge(base_price, devices):
@@ -104,34 +179,21 @@ def create_sub(client_token, package_id, user_id=None, days=None, devices=None):
         _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], price)
         raise APIError("Insufficient balance", 402)
 
-    panel_user_id = f"api_{user_id}_{secrets.token_hex(4)}" if user_id else f"api_{secrets.token_hex(4)}_{secrets.token_hex(4)}"
-    expires_at = (datetime.now(timezone.utc) + timedelta(days=duration)).isoformat()
+    username = _make_username(user_id)
+    expires_at = _iso_z(datetime.now(timezone.utc) + timedelta(days=duration))
 
-    # Determine maxDevices to send to panel: 0 means panel default
-    panel_max_devices = devices if devices and devices > 0 else 0
+    # Device limit sent to the panel: explicit count, or package default.
+    hwid_limit = devices if devices and devices > 0 else (pkg.get("max_devices") or None)
 
-    try:
-        panel_user = create_user(
-            user_id=panel_user_id,
-            username=panel_user_id,
-            groups=pkg["groups"],
-            traffic_limit_gb=pkg["traffic_limit_gb"],
-            expire_at=expires_at,
-        )
-    except httpx.HTTPStatusError as e:
-        detail = _parse_panel_error(e)
-        logger.error("Panel error on create_user: %s %s", e.response.status_code, detail)
-        raise APIError(f"Panel error: {detail}", 502)
-    except httpx.ConnectError:
-        logger.error("Panel unreachable on create_user")
-        raise APIError("Panel unreachable", 502)
-
-    # Set maxDevices via update (panel POST doesn't accept maxDevices)
-    if panel_max_devices:
-        try:
-            update_user(panel_user["userId"], maxDevices=panel_max_devices)
-        except Exception:
-            logger.warning("Failed to set maxDevices=%s for %s", panel_max_devices, panel_user["userId"], exc_info=True)
+    panel_user = _panel_call(
+        create_user,
+        username=username,
+        squads=pkg["groups"],
+        traffic_limit_gb=pkg["traffic_limit_gb"],
+        expire_at=expires_at,
+        hwid_device_limit=hwid_limit,
+        action="create_user",
+    )
 
     new_balance = update_balance(client_token["id"], -price)
     if new_balance < LOW_BALANCE_THRESHOLD:
@@ -140,9 +202,12 @@ def create_sub(client_token, package_id, user_id=None, days=None, devices=None):
     sub = create_subscription(
         client_token_id=client_token["id"],
         package_id=pkg["id"],
-        panel_user_id=panel_user["userId"],
-        panel_subscription_token=panel_user.get("subscriptionToken"),
+        panel_user_id=panel_user["username"],
+        panel_subscription_token=panel_user.get("shortUuid"),
         expires_at=expires_at,
+        panel="remnawave",
+        panel_uuid=panel_user["uuid"],
+        sub_url=panel_user.get("subscriptionUrl"),
     )
 
     desc = f"Subscription: {pkg['name']}" + (f" ({duration}д)" if is_flex else "")
@@ -158,8 +223,7 @@ def create_sub(client_token, package_id, user_id=None, days=None, devices=None):
 
     logger.info("Subscription created: id=%s client=%s pkg=%s days=%s devices=%s price=%.0f surcharge=%.0f balance=%.0f", sub["id"], client_token["id"], pkg["name"], duration, devices, price, surcharge, new_balance)
 
-    sub_link = f"{PANEL_SUB_URL}/api/files/{panel_user.get('subscriptionToken')}" if panel_user.get("subscriptionToken") else None
-    return {**sub, "sub_link": sub_link}
+    return {**sub, "sub_link": sub_link(sub)}
 
 
 def renew_sub(client_token, sub_id, days=None):
@@ -168,6 +232,7 @@ def renew_sub(client_token, sub_id, days=None):
         raise APIError("Subscription not found", 404)
     if sub["status"] == "deleted":
         raise APIError("Cannot renew deleted subscription", 400)
+    _require_remnawave(sub)
 
     pkg = get_package(sub["package_id"])
     if not pkg:
@@ -187,21 +252,10 @@ def renew_sub(client_token, sub_id, days=None):
         _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], price)
         raise APIError("Insufficient balance", 402)
 
-    current_exp = datetime.fromisoformat(sub["expires_at"].replace("Z", "+00:00"))
-    if current_exp.tzinfo is None:
-        current_exp = current_exp.replace(tzinfo=timezone.utc)
-    base = max(current_exp, datetime.now(timezone.utc))
-    new_expires = (base + timedelta(days=duration)).isoformat()
+    base = max(_parse_dt(sub["expires_at"]), datetime.now(timezone.utc))
+    new_expires = _iso_z(base + timedelta(days=duration))
 
-    try:
-        update_user(sub["panel_user_id"], expireAt=new_expires)
-    except httpx.HTTPStatusError as e:
-        detail = _parse_panel_error(e)
-        logger.error("Panel error on renew update_user: %s %s", e.response.status_code, detail)
-        raise APIError(f"Panel error: {detail}", 502)
-    except httpx.ConnectError:
-        logger.error("Panel unreachable on renew update_user")
-        raise APIError("Panel unreachable", 502)
+    _panel_call(update_user, sub["panel_uuid"], expireAt=new_expires, action="renew update_user")
 
     update_expires_at(sub_id, new_expires)
     new_balance = update_balance(client_token["id"], -price)
@@ -225,9 +279,9 @@ def renew_sub(client_token, sub_id, days=None):
 
 
 def update_sub_devices(client_token, sub_id, devices):
-    """Change device count on an existing subscription.
+    """Change device limit (hwidDeviceLimit) on an existing subscription.
 
-    ``devices`` = 0 means reset to panel default.
+    ``devices`` = 0 means reset to the panel/global default.
     Extra devices (above BASE_DEVICES_INCLUDED) incur a one-time surcharge
     based on remaining days.
     """
@@ -236,6 +290,7 @@ def update_sub_devices(client_token, sub_id, devices):
         raise APIError("Subscription not found", 404)
     if sub["status"] == "deleted":
         raise APIError("Cannot modify deleted subscription", 400)
+    _require_remnawave(sub)
 
     if devices < 0:
         raise APIError("devices must be >= 0", 400)
@@ -245,10 +300,7 @@ def update_sub_devices(client_token, sub_id, devices):
         raise APIError("Package not found", 404)
 
     # Calculate remaining days for surcharge
-    current_exp = datetime.fromisoformat(sub["expires_at"].replace("Z", "+00:00"))
-    if current_exp.tzinfo is None:
-        current_exp = current_exp.replace(tzinfo=timezone.utc)
-    remaining = (current_exp - datetime.now(timezone.utc)).total_seconds() / 86400
+    remaining = (_parse_dt(sub["expires_at"]) - datetime.now(timezone.utc)).total_seconds() / 86400
     remaining_days = max(remaining, 0)
 
     # Surcharge for extra devices
@@ -264,17 +316,8 @@ def update_sub_devices(client_token, sub_id, devices):
             _notify_insufficient_balance(client_token.get("telegram_user_id"), client_token["balance"], surcharge)
             raise APIError("Insufficient balance", 402)
 
-    panel_max_devices = devices if devices > 0 else 0
-
-    try:
-        update_user(sub["panel_user_id"], maxDevices=panel_max_devices)
-    except httpx.HTTPStatusError as e:
-        detail = _parse_panel_error(e)
-        logger.error("Panel error on update_user devices: %s %s", e.response.status_code, detail)
-        raise APIError(f"Panel error: {detail}", 502)
-    except httpx.ConnectError:
-        logger.error("Panel unreachable on update_user devices")
-        raise APIError("Panel unreachable", 502)
+    # 0 resets to the panel/global default device limit.
+    _panel_call(update_user, sub["panel_uuid"], hwidDeviceLimit=devices, action="update_user devices")
 
     if surcharge > 0:
         new_balance = update_balance(client_token["id"], -surcharge)
@@ -296,6 +339,105 @@ def update_sub_devices(client_token, sub_id, devices):
     return {"success": True, "devices": devices, "surcharge": round(surcharge, 2)}
 
 
+# ---------------------------------------------------------------------------
+# Migration: replace a legacy Celerity link with a fresh Remnawave one (1:1)
+# ---------------------------------------------------------------------------
+
+
+def migrate_sub(client_token, sub_id):
+    """Replace a legacy Celerity subscription with an equivalent Remnawave one.
+
+    Same expiry, same package conditions (traffic, squads, devices). The old
+    subscription is kept (not deleted). No balance is charged. Idempotent: if
+    the subscription was already migrated, the existing replacement is returned.
+    """
+    sub = get_subscription_for_client(sub_id, client_token["id"])
+    if not sub:
+        raise APIError("Subscription not found", 404)
+
+    if not _is_legacy(sub):
+        raise APIError("Подписка уже на новой панели (Remnawave)", 400)
+
+    # Already migrated → remind of the existing replacement, do not create again.
+    if sub.get("migrated_to_id"):
+        new = get_subscription(sub["migrated_to_id"])
+        if new:
+            return {**new, "sub_link": sub_link(new), "already_migrated": True}
+
+    if sub["status"] == "deleted":
+        raise APIError("Cannot migrate a deleted subscription", 400)
+
+    pkg = get_package(sub["package_id"])
+    if not pkg:
+        raise APIError("Package not found", 404)
+
+    # Preserve the original term exactly.
+    expires_at = _iso_z(_parse_dt(sub["expires_at"]))
+    username = _make_username()
+    hwid_limit = pkg.get("max_devices") or None
+
+    panel_user = _panel_call(
+        create_user,
+        username=username,
+        squads=pkg["groups"],
+        traffic_limit_gb=pkg["traffic_limit_gb"],
+        expire_at=expires_at,
+        hwid_device_limit=hwid_limit,
+        description=f"migrated from celerity sub#{sub_id}",
+        action="migrate create_user",
+    )
+
+    new = create_subscription(
+        client_token_id=client_token["id"],
+        package_id=pkg["id"],
+        panel_user_id=panel_user["username"],
+        panel_subscription_token=panel_user.get("shortUuid"),
+        expires_at=expires_at,
+        panel="remnawave",
+        panel_uuid=panel_user["uuid"],
+        sub_url=panel_user.get("subscriptionUrl"),
+    )
+    set_migrated_to(sub_id, new["id"])
+
+    logger.info("Subscription migrated: old=%s -> new=%s client=%s pkg=%s", sub_id, new["id"], client_token["id"], pkg["name"])
+
+    return {**new, "sub_link": sub_link(new), "already_migrated": False}
+
+
+# ---------------------------------------------------------------------------
+# HWID device management
+# ---------------------------------------------------------------------------
+
+
+def list_sub_devices(client_token, sub_id):
+    sub = get_subscription_for_client(sub_id, client_token["id"])
+    if not sub:
+        raise APIError("Subscription not found", 404)
+    _require_remnawave(sub)
+    devices = _panel_call(get_hwid_devices, sub["panel_uuid"], action="get_hwid_devices")
+    return {"devices": devices, "total": len(devices)}
+
+
+def reset_sub_devices(client_token, sub_id):
+    sub = get_subscription_for_client(sub_id, client_token["id"])
+    if not sub:
+        raise APIError("Subscription not found", 404)
+    _require_remnawave(sub)
+    _panel_call(delete_all_hwid_devices, sub["panel_uuid"], action="delete_all_hwid_devices")
+    logger.info("HWID reset: sub=%s client=%s", sub_id, client_token["id"])
+    return {"success": True}
+
+
+def delete_sub_device(client_token, sub_id, hwid):
+    sub = get_subscription_for_client(sub_id, client_token["id"])
+    if not sub:
+        raise APIError("Subscription not found", 404)
+    _require_remnawave(sub)
+    _panel_call(delete_hwid_device, sub["panel_uuid"], hwid, action="delete_hwid_device")
+    logger.info("HWID device removed: sub=%s hwid=%s", sub_id, hwid)
+    return {"success": True}
+
+
 def calc_refund(sub):
     """Calculate refund amount for unused days of a subscription.
 
@@ -308,12 +450,8 @@ def calc_refund(sub):
         return 0
 
     now = datetime.now(timezone.utc)
-    created = datetime.fromisoformat(sub["created_at"].replace("Z", "+00:00"))
-    expires = datetime.fromisoformat(sub["expires_at"].replace("Z", "+00:00"))
-    if created.tzinfo is None:
-        created = created.replace(tzinfo=timezone.utc)
-    if expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
+    created = _parse_dt(sub["created_at"])
+    expires = _parse_dt(sub["expires_at"])
 
     if expires <= now:
         return 0
@@ -322,8 +460,8 @@ def calc_refund(sub):
     if total_seconds <= 0:
         return 0
 
-    used_seconds = (now - created).total_seconds()
     remaining_seconds = (expires - now).total_seconds()
+    used_seconds = (now - created).total_seconds()
 
     remaining_days = remaining_seconds / 86400
     total_days = total_seconds / 86400
@@ -352,16 +490,19 @@ def delete_sub(sub_id, client_token_id):
 
     refund = calc_refund(sub)
 
-    try:
-        delete_user(sub["panel_user_id"])
-    except httpx.HTTPStatusError as e:
-        if e.response.status_code != 404:
-            detail = _parse_panel_error(e)
-            logger.error("Panel error on delete_user: %s %s", e.response.status_code, detail)
-            raise APIError(f"Panel error: {detail}", 502)
-    except httpx.ConnectError:
-        logger.error("Panel unreachable on delete_user")
-        raise APIError("Panel unreachable", 502)
+    # Legacy Celerity panel is decommissioned — there is no panel user to delete,
+    # so legacy subscriptions are removed locally only.
+    if not _is_legacy(sub) and sub.get("panel_uuid"):
+        try:
+            delete_user(sub["panel_uuid"])
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code != 404:
+                detail = _parse_panel_error(e)
+                logger.error("Panel error on delete_user: %s %s", e.response.status_code, detail)
+                raise APIError(f"Panel error: {detail}", 502)
+        except httpx.ConnectError:
+            logger.error("Panel unreachable on delete_user")
+            raise APIError("Panel unreachable", 502)
 
     if refund > 0:
         update_balance(client_token_id, refund)

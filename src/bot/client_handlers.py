@@ -13,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-from src.config import API_BASE_URL, DOCS_PASS, DOCS_URL, PANEL_SUB_URL
+from src.config import API_BASE_URL, DOCS_PASS, DOCS_URL
 from src.models.client_token import get_client_token_by_telegram
 from src.models.package import get_package, list_packages
 from src.models.subscription import (
@@ -23,7 +23,16 @@ from src.models.subscription import (
     list_subscriptions_page,
     search_subscriptions,
 )
-from src.services.subscription_service import APIError, calc_refund, delete_sub, renew_sub
+from src.services.subscription_service import (
+    APIError,
+    calc_refund,
+    delete_sub,
+    renew_sub,
+    migrate_sub,
+    list_sub_devices,
+    reset_sub_devices,
+    sub_link,
+)
 
 # States
 (
@@ -32,7 +41,8 @@ from src.services.subscription_service import APIError, calc_refund, delete_sub,
     CLIENT_SUB_DETAIL,
     CLIENT_SEARCH,
     CLIENT_CONFIRM,
-) = range(5)
+    CLIENT_DEVICES,
+) = range(6)
 
 PAGE_SIZE = 8
 
@@ -136,18 +146,26 @@ def _kb_subs(
 
 def _kb_sub_detail(sub: dict) -> InlineKeyboardMarkup:
     rows = []
-    if sub.get("panel_subscription_token"):
-        link = f"{PANEL_SUB_URL}/api/files/{sub['panel_subscription_token']}"
+    link = sub_link(sub)
+    if link:
         rows.append([InlineKeyboardButton("🔗 Ссылка подписки", url=link)])
     if sub["status"] != "deleted":
-        action_row = []
-        action_row.append(
-            InlineKeyboardButton("🔄 Продлить", callback_data=f"cl_renew:{sub['id']}")
-        )
-        action_row.append(
-            InlineKeyboardButton("🗑 Удалить", callback_data=f"cl_delete:{sub['id']}")
-        )
-        rows.append(action_row)
+        if sub.get("panel") == "celerity":
+            # Legacy subscription — the only panel action available is migration.
+            rows.append([
+                InlineKeyboardButton(
+                    "🔄 Заменить ссылку (новая панель)", callback_data=f"cl_migrate:{sub['id']}"
+                )
+            ])
+            rows.append([InlineKeyboardButton("🗑 Удалить", callback_data=f"cl_delete:{sub['id']}")])
+        else:
+            rows.append([
+                InlineKeyboardButton("🔄 Продлить", callback_data=f"cl_renew:{sub['id']}"),
+                InlineKeyboardButton("🗑 Удалить", callback_data=f"cl_delete:{sub['id']}"),
+            ])
+            rows.append([
+                InlineKeyboardButton("📱 Устройства", callback_data=f"cl_devices:{sub['id']}")
+            ])
     rows.append([InlineKeyboardButton("🔙 К подпискам", callback_data="cl_back_subs")])
     return InlineKeyboardMarkup(rows)
 
@@ -178,6 +196,11 @@ def _fmt_sub_detail(s: dict) -> str:
     lines.append(f"Истекает: `{s['expires_at'][:10]}`")
     lines.append(f"Создана: `{s['created_at'][:10]}`")
     lines.append(f"Panel ID: `{_esc(s.get('panel_user_id', '—'))}`")
+    if s.get("panel") == "celerity":
+        if s.get("migrated_to_id"):
+            lines.append(f"\n♻️ Ссылка уже заменена на новую (подписка #{s['migrated_to_id']}).")
+        else:
+            lines.append("\n⚠️ Старая панель. Замените ссылку на новую — срок и условия сохранятся.")
     return "\n".join(lines)
 
 
@@ -477,7 +500,110 @@ async def on_sub_detail(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return CLIENT_CONFIRM
 
+    if data.startswith("cl_migrate:"):
+        sub_id = int(data.split(":")[1])
+        try:
+            res = migrate_sub(ct, sub_id)
+        except APIError as e:
+            await q.edit_message_text(
+                f"❌ Ошибка: {_esc(str(e))}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("🔙 Меню", callback_data="cl_back_main")]]
+                ),
+            )
+            return CLIENT_MAIN
+        link = res.get("sub_link")
+        header = (
+            "ℹ️ Эта подписка уже была заменена ранее.\nВот ваша актуальная ссылка:"
+            if res.get("already_migrated")
+            else "✅ *Ссылка заменена на новую панель!*\nСрок и условия сохранены."
+        )
+        rows = []
+        if link:
+            rows.append([InlineKeyboardButton("🔗 Новая ссылка подписки", url=link)])
+        rows.append([InlineKeyboardButton("🔙 К подпискам", callback_data="cl_back_subs")])
+        await q.edit_message_text(
+            f"{header}\n\nНовая подписка: #{res['id']}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+        return CLIENT_SUB_DETAIL
+
+    if data.startswith("cl_devices:"):
+        sub_id = int(data.split(":")[1])
+        ud["dev_sub_id"] = sub_id
+        return await _render_devices(q, ct, sub_id)
+
     return CLIENT_SUB_DETAIL
+
+
+async def _render_devices(q, ct, sub_id) -> int:
+    try:
+        res = list_sub_devices(ct, sub_id)
+    except APIError as e:
+        await _safe_edit(
+            q,
+            f"❌ Ошибка: {_esc(str(e))}",
+            InlineKeyboardMarkup([[InlineKeyboardButton("🔙 К подпискам", callback_data="cl_back_subs")]]),
+        )
+        return CLIENT_SUB_DETAIL
+
+    devices = res.get("devices", [])
+    if devices:
+        lines = [f"📱 *Устройства подписки #{sub_id}* ({len(devices)})\n"]
+        for i, d in enumerate(devices, 1):
+            model = d.get("deviceModel") or d.get("platform") or "устройство"
+            plat = d.get("platform") or ""
+            osv = d.get("osVersion") or ""
+            lines.append(f"`{i}.` {_esc(model)} ({_esc(plat)} {_esc(osv)})".rstrip())
+        text = "\n".join(lines)
+    else:
+        text = f"📱 *Устройства подписки #{sub_id}*\n\n_Нет привязанных устройств._"
+
+    rows = []
+    if devices:
+        rows.append([InlineKeyboardButton("♻️ Сбросить все устройства", callback_data=f"cl_dev_reset:{sub_id}")])
+    rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"cl_devices:{sub_id}")])
+    rows.append([InlineKeyboardButton("🔙 К подписке", callback_data=f"cl_dev_back:{sub_id}")])
+    await _safe_edit(q, text, InlineKeyboardMarkup(rows))
+    return CLIENT_DEVICES
+
+
+async def on_devices(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    if q is None:
+        return CLIENT_DEVICES
+    await q.answer()
+    data = q.data or ""
+    ct = _get_ct(update)
+    if not ct:
+        return ConversationHandler.END
+
+    if data.startswith("cl_devices:"):
+        sub_id = int(data.split(":")[1])
+        return await _render_devices(q, ct, sub_id)
+
+    if data.startswith("cl_dev_reset:"):
+        sub_id = int(data.split(":")[1])
+        try:
+            reset_sub_devices(ct, sub_id)
+            await q.answer("Устройства сброшены", show_alert=True)
+        except APIError as e:
+            await q.answer(f"Ошибка: {e}", show_alert=True)
+        return await _render_devices(q, ct, sub_id)
+
+    if data.startswith("cl_dev_back:"):
+        sub_id = int(data.split(":")[1])
+        sub = get_subscription_for_client(sub_id, ct["id"])
+        if not sub:
+            await _safe_edit(q, _main_text(ct), _kb_main())
+            return CLIENT_MAIN
+        _enrich_sub(sub)
+        await _safe_edit(q, _fmt_sub_detail(sub), _kb_sub_detail(sub))
+        return CLIENT_SUB_DETAIL
+
+    return CLIENT_DEVICES
 
 
 async def on_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
@@ -667,7 +793,13 @@ def register(app) -> None:
             CLIENT_SUB_DETAIL: [
                 CallbackQueryHandler(
                     on_sub_detail,
-                    pattern="^(cl_back_subs|cl_back_main|cl_renew:\\d+|cl_delete:\\d+)$",
+                    pattern="^(cl_back_subs|cl_back_main|cl_renew:\\d+|cl_delete:\\d+|cl_migrate:\\d+|cl_devices:\\d+)$",
+                ),
+            ],
+            CLIENT_DEVICES: [
+                CallbackQueryHandler(
+                    on_devices,
+                    pattern="^(cl_devices:\\d+|cl_dev_reset:\\d+|cl_dev_back:\\d+)$",
                 ),
             ],
             CLIENT_CONFIRM: [

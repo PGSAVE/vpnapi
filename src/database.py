@@ -100,6 +100,10 @@ def init_db():
             package_id INTEGER NOT NULL REFERENCES packages(id),
             panel_user_id TEXT NOT NULL,
             panel_subscription_token TEXT,
+            panel TEXT NOT NULL DEFAULT 'remnawave',
+            panel_uuid TEXT,
+            sub_url TEXT,
+            migrated_to_id INTEGER REFERENCES subscriptions(id),
             status TEXT DEFAULT 'active' CHECK(status IN ('active','expired','deleted')),
             expires_at TEXT NOT NULL,
             created_at TEXT DEFAULT (datetime('now'))
@@ -121,41 +125,71 @@ def init_db():
         );
     """)
     db.commit()
-    _migrate_group_names_to_ids(db)
+    _migrate_to_remnawave(db)
 
 
-def _migrate_group_names_to_ids(db: sqlite3.Connection):
-    """One-time migration: convert group name strings to {_id, name} dicts."""
-    from src.services.panel_api import list_groups
+def _column_names(db: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in db.execute(f"PRAGMA table_info({table})").fetchall()}
 
-    rows = db.execute("SELECT id, groups FROM packages").fetchall()
-    needs_migration = False
-    for row in rows:
-        groups = json.loads(row["groups"] or "[]")
-        if groups and isinstance(groups[0], str):
-            needs_migration = True
-            break
 
-    if not needs_migration:
+def _migrate_to_remnawave(db: sqlite3.Connection):
+    """Migrate the schema/data from the Celerity layout to Remnawave.
+
+    Idempotent: safe to run on every startup.
+      1. Add the new subscription columns to legacy databases.
+      2. Tag every pre-existing subscription as panel='celerity'.
+      3. Assign the default 'main' Remnawave squad to every package (one-time).
+    """
+    # 1. Add new columns to legacy `subscriptions` tables.
+    cols = _column_names(db, "subscriptions")
+    legacy_db = "panel" not in cols  # table existed without our new columns
+    alters = {
+        "panel": "ALTER TABLE subscriptions ADD COLUMN panel TEXT",
+        "panel_uuid": "ALTER TABLE subscriptions ADD COLUMN panel_uuid TEXT",
+        "sub_url": "ALTER TABLE subscriptions ADD COLUMN sub_url TEXT",
+        "migrated_to_id": "ALTER TABLE subscriptions ADD COLUMN migrated_to_id INTEGER",
+    }
+    for col, stmt in alters.items():
+        if col not in cols:
+            db.execute(stmt)
+
+    # 2. Every subscription that existed before this migration was created on
+    #    Celerity. New rows are inserted with panel='remnawave' explicitly.
+    if legacy_db:
+        db.execute("UPDATE subscriptions SET panel='celerity' WHERE panel IS NULL")
+        log.info("Tagged existing subscriptions as Celerity (legacy)")
+    db.commit()
+
+    # 3. Assign the default main squad to all packages (one-time).
+    _assign_default_squad(db)
+
+
+def _assign_default_squad(db: sqlite3.Connection):
+    """One-time: set the default Remnawave 'main' squad on every package."""
+    from src.models.settings import get_setting, set_setting
+
+    if get_setting("remnawave_squad_migration_done") == "1":
         return
 
-    panel_groups = list_groups()
-    name_to_group = {g["name"]: g for g in panel_groups}
+    from src.config import DEFAULT_SQUAD_UUID, DEFAULT_SQUAD_NAME
+    from src.services.panel_api import get_main_squad
 
-    updated = 0
+    if DEFAULT_SQUAD_UUID:
+        squad = {"uuid": DEFAULT_SQUAD_UUID, "name": DEFAULT_SQUAD_NAME}
+    else:
+        squad = get_main_squad()
+
+    if not squad:
+        log.warning(
+            "Default squad not resolved (panel unreachable and DEFAULT_SQUAD_UUID unset); "
+            "will retry on next startup"
+        )
+        return
+
+    payload = json.dumps([squad])
+    rows = db.execute("SELECT id FROM packages").fetchall()
     for row in rows:
-        groups = json.loads(row["groups"] or "[]")
-        if not groups or not isinstance(groups[0], str):
-            continue
-        new_groups = []
-        for name in groups:
-            if name in name_to_group:
-                new_groups.append(name_to_group[name])
-            else:
-                log.warning("Group '%s' not found in panel, skipping (pkg %s)", name, row["id"])
-        db.execute("UPDATE packages SET groups=? WHERE id=?", (json.dumps(new_groups), row["id"]))
-        updated += 1
-
-    if updated:
-        db.commit()
-        log.info("Migrated groups for %d packages (name -> ObjectId)", updated)
+        db.execute("UPDATE packages SET groups=? WHERE id=?", (payload, row["id"]))
+    db.commit()
+    set_setting("remnawave_squad_migration_done", "1")
+    log.info("Assigned default squad '%s' to %d packages", squad["name"], len(rows))

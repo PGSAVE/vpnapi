@@ -28,7 +28,7 @@ from src.models.package import (
 )
 from src.models.subscription import count_expired, count_new_subscriptions_today, count_subscriptions
 from src.models.transaction import create_transaction, get_detailed_stats
-from src.services.panel_api import list_groups as fetch_groups
+from src.services.panel_api import list_squads as fetch_squads
 
 log = logging.getLogger(__name__)
 
@@ -151,7 +151,7 @@ def kb_pkg_edit_menu(pkg_id: int) -> InlineKeyboardMarkup:
                 ),
                 InlineKeyboardButton("💰 Цена (₽)", callback_data=f"pef:{pid}:price"),
             ],
-            [InlineKeyboardButton("🌐 Группы", callback_data=f"pkg_edit_groups:{pid}")],
+            [InlineKeyboardButton("🌐 Сквады", callback_data=f"pkg_edit_groups:{pid}")],
             [
                 InlineKeyboardButton(
                     "🔙 К пакету", callback_data=f"back_pkg_detail:{pid}"
@@ -164,12 +164,12 @@ def kb_pkg_edit_menu(pkg_id: int) -> InlineKeyboardMarkup:
 def kb_groups(all_groups: list[dict], selected: set) -> InlineKeyboardMarkup:
     """Groups referenced by index so callback_data stays within 64 bytes.
 
-    ``all_groups`` is a list of ``{"_id": ..., "name": ...}`` dicts.
-    ``selected`` is a set of ``_id`` strings.
+    ``all_groups`` is a list of ``{"uuid": ..., "name": ...}`` squad dicts.
+    ``selected`` is a set of ``uuid`` strings.
     """
     rows = []
     for i, g in enumerate(all_groups):
-        mark = "✅" if g["_id"] in selected else "⬜️"
+        mark = "✅" if g["uuid"] in selected else "⬜️"
         rows.append([InlineKeyboardButton(f"{mark} {g['name']}", callback_data=f"grp:{i}")])
     rows.append([InlineKeyboardButton("✓ Готово", callback_data="grp_done")])
     return InlineKeyboardMarkup(rows)
@@ -238,7 +238,7 @@ def fmt_pkg(p: dict) -> str:
         f"Устройств: `{p['max_devices']}`\n"
         f"Длительность: `{'Гибкий' if not p['duration_days'] else str(p['duration_days']) + ' дней'}`\n"
         f"Цена: `{p['price']} {'₽/день' if not p['duration_days'] else '₽'}`\n"
-        f"Группы: {_esc(groups)}\n"
+        f"Сквады: {_esc(groups)}\n"
         f"Описание: {desc}\n"
         f"ID: `{p['id']}`"
     )
@@ -322,11 +322,11 @@ async def _show_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     selected = ud.get("selected_groups", set())
     if all_groups:
         header = (
-            "🌐 *Выберите группы* для пакета:\n"
-            "Нажмите на группу, чтобы добавить или убрать её."
+            "🌐 *Выберите сквады* для пакета:\n"
+            "Нажмите на сквад, чтобы добавить или убрать его."
         )
     else:
-        header = "🌐 *Группы*\n_(Нет доступных групп из панели — нажмите «✓ Готово»)_"
+        header = "🌐 *Сквады*\n_(Нет доступных сквадов из панели — нажмите «✓ Готово»)_"
     await _edit_or_reply(update, header, kb_groups(all_groups, selected))
 
 
@@ -397,7 +397,7 @@ def _toggle_group(cb_data: str, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     all_groups = ud.get("all_groups", [])
     if idx >= len(all_groups):
         return
-    gid: str = all_groups[idx]["_id"]
+    gid: str = all_groups[idx]["uuid"]
     selected: set = ud.setdefault("selected_groups", set())
     if gid in selected:
         selected.discard(gid)
@@ -638,7 +638,7 @@ async def on_pkg_create_desc_skip(
 
 async def _enter_create_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ud = _ud(ctx)
-    ud["all_groups"] = fetch_groups()
+    ud["all_groups"] = fetch_squads()
     ud["selected_groups"] = set()
     await _show_groups(update, ctx)
     return PKG_CREATE_GROUPS
@@ -655,7 +655,7 @@ async def on_pkg_create_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -
     if data == "grp_done":
         selected = ud.get("selected_groups", set())
         all_groups = ud.get("all_groups", [])
-        groups_to_save = [g for g in all_groups if g["_id"] in selected]
+        groups_to_save = [g for g in all_groups if g["uuid"] in selected]
         d = ud.get("pkg_new", {})
         pkg = create_package(
             d.get("name", ""),
@@ -770,8 +770,8 @@ async def on_pkg_edit_menu(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> in
         pkg_id = int(data.split(":")[1])
         pkg = get_package(pkg_id)
         ud["pkg_id"] = pkg_id
-        ud["all_groups"] = fetch_groups()
-        ud["selected_groups"] = {g["_id"] for g in (pkg.get("groups") or []) if isinstance(g, dict)} if pkg else set()
+        ud["all_groups"] = fetch_squads()
+        ud["selected_groups"] = {g["uuid"] for g in (pkg.get("groups") or []) if isinstance(g, dict)} if pkg else set()
         await _show_groups(update, ctx)
         return PKG_EDIT_GROUPS
 
@@ -903,7 +903,7 @@ async def on_pkg_edit_groups(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> 
         selected = ud.get("selected_groups", set())
         all_groups = ud.get("all_groups", [])
         if pkg_id is not None:
-            groups_to_save = [g for g in all_groups if g["_id"] in selected]
+            groups_to_save = [g for g in all_groups if g["uuid"] in selected]
             update_package(pkg_id, groups=groups_to_save)
             pkg = get_package(pkg_id)
             if pkg:

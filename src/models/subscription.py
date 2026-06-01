@@ -1,14 +1,32 @@
 from src.database import get_db
 
 
-def create_subscription(client_token_id, package_id, panel_user_id, panel_subscription_token, expires_at):
+def create_subscription(
+    client_token_id,
+    package_id,
+    panel_user_id,
+    panel_subscription_token,
+    expires_at,
+    panel="remnawave",
+    panel_uuid=None,
+    sub_url=None,
+):
     db = get_db()
     cur = db.execute(
-        "INSERT INTO subscriptions (client_token_id, package_id, panel_user_id, panel_subscription_token, expires_at) VALUES (?,?,?,?,?)",
-        (client_token_id, package_id, panel_user_id, panel_subscription_token, expires_at),
+        "INSERT INTO subscriptions "
+        "(client_token_id, package_id, panel_user_id, panel_subscription_token, panel, panel_uuid, sub_url, expires_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (client_token_id, package_id, panel_user_id, panel_subscription_token, panel, panel_uuid, sub_url, expires_at),
     )
     db.commit()
     return get_subscription(cur.lastrowid)
+
+
+def set_migrated_to(old_sub_id, new_sub_id):
+    """Link a legacy (Celerity) subscription to its new Remnawave replacement."""
+    db = get_db()
+    db.execute("UPDATE subscriptions SET migrated_to_id=? WHERE id=?", (new_sub_id, old_sub_id))
+    db.commit()
 
 
 def get_subscription(sub_id):

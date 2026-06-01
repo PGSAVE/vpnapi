@@ -3,10 +3,20 @@ from pydantic import BaseModel, Field
 from typing import Optional
 
 from src.api.middleware import auth_dependency
-from src.config import PANEL_SUB_URL
 from src.models.package import list_packages
 from src.models.subscription import list_subscriptions, get_subscription_for_client
-from src.services.subscription_service import create_sub, delete_sub, renew_sub, update_sub_devices, APIError
+from src.services.subscription_service import (
+    create_sub,
+    delete_sub,
+    renew_sub,
+    update_sub_devices,
+    migrate_sub,
+    list_sub_devices,
+    reset_sub_devices,
+    delete_sub_device,
+    sub_link,
+    APIError,
+)
 
 router = APIRouter(prefix="/vpnapi", dependencies=[Depends(auth_dependency)])
 
@@ -89,7 +99,7 @@ def get_subscription(sub_id: int, ct=Depends(auth_dependency)):
     sub = get_subscription_for_client(sub_id, ct["id"])
     if not sub:
         raise HTTPException(404, "Not found")
-    sub["sub_link"] = f"{PANEL_SUB_URL}/api/files/{sub['panel_subscription_token']}" if sub.get("panel_subscription_token") else None
+    sub["sub_link"] = sub_link(sub)
     return sub
 
 
@@ -133,6 +143,82 @@ def renew_subscription(sub_id: int, days: Optional[int] = None, ct=Depends(auth_
 def put_subscription_devices(sub_id: int, body: UpdateDevicesBody, ct=Depends(auth_dependency)):
     try:
         return update_sub_devices(ct, sub_id, body.devices)
+    except APIError as e:
+        raise HTTPException(e.status_code, str(e))
+
+
+@router.post(
+    "/subscriptions/{sub_id}/migrate",
+    summary="Заменить ссылку на новую панель (миграция)",
+    description="Заменяет ссылку старой подписки (Celerity) на новую (Remnawave) 1:1 — "
+    "тот же срок и те же условия. Старая подписка не удаляется. "
+    "Если подписка уже была мигрирована, повторно ничего не создаётся — "
+    "возвращается ранее выданная ссылка (поле `already_migrated=true`). "
+    "Списание с баланса не производится.",
+    responses={
+        200: {"description": "Ссылка заменена (или возвращена ранее созданная)"},
+        400: {"description": "Подписка уже на новой панели / удалена"},
+        404: {"description": "Подписка не найдена"},
+        502: {"description": "Ошибка панели управления"},
+    },
+)
+def migrate_subscription(sub_id: int, ct=Depends(auth_dependency)):
+    try:
+        return migrate_sub(ct, sub_id)
+    except APIError as e:
+        raise HTTPException(e.status_code, str(e))
+
+
+@router.get(
+    "/subscriptions/{sub_id}/devices",
+    summary="Список привязанных устройств",
+    description="Возвращает список устройств (HWID), привязанных к подписке.",
+    responses={
+        200: {"description": "Список устройств"},
+        400: {"description": "Недоступно для старой подписки — выполните миграцию"},
+        404: {"description": "Подписка не найдена"},
+        502: {"description": "Ошибка панели управления"},
+    },
+)
+def get_subscription_devices(sub_id: int, ct=Depends(auth_dependency)):
+    try:
+        return list_sub_devices(ct, sub_id)
+    except APIError as e:
+        raise HTTPException(e.status_code, str(e))
+
+
+@router.delete(
+    "/subscriptions/{sub_id}/devices",
+    summary="Сбросить все привязки устройств",
+    description="Снимает все привязки устройств (HWID) с подписки разом.",
+    responses={
+        200: {"description": "Все устройства отвязаны"},
+        400: {"description": "Недоступно для старой подписки — выполните миграцию"},
+        404: {"description": "Подписка не найдена"},
+        502: {"description": "Ошибка панели управления"},
+    },
+)
+def reset_subscription_devices(sub_id: int, ct=Depends(auth_dependency)):
+    try:
+        return reset_sub_devices(ct, sub_id)
+    except APIError as e:
+        raise HTTPException(e.status_code, str(e))
+
+
+@router.delete(
+    "/subscriptions/{sub_id}/devices/{hwid}",
+    summary="Отвязать конкретное устройство",
+    description="Снимает привязку одного устройства по его HWID.",
+    responses={
+        200: {"description": "Устройство отвязано"},
+        400: {"description": "Недоступно для старой подписки — выполните миграцию"},
+        404: {"description": "Подписка не найдена"},
+        502: {"description": "Ошибка панели управления"},
+    },
+)
+def delete_subscription_device(sub_id: int, hwid: str, ct=Depends(auth_dependency)):
+    try:
+        return delete_sub_device(ct, sub_id, hwid)
     except APIError as e:
         raise HTTPException(e.status_code, str(e))
 
